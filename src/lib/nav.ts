@@ -1,6 +1,6 @@
 import {
   Activity, BarChart3, Bell, BookOpen, DoorOpen, LayoutDashboard, LibraryBig, LogIn,
-  Megaphone, Settings, Users, type LucideIcon,
+  Megaphone, Settings, UserCog, Users, type LucideIcon,
 } from 'lucide-react';
 import type { Role } from './types';
 
@@ -41,6 +41,11 @@ const adminSection: NavSection = {
   ],
 };
 
+const accountSection: NavSection = {
+  label: 'Account',
+  items: [{ label: 'Account settings', to: '/app/account', icon: UserCog }],
+};
+
 const readerNav: NavSection[] = [
   {
     label: 'Read',
@@ -52,9 +57,9 @@ const readerNav: NavSection[] = [
 ];
 
 export function navForRole(role: Role | undefined | null): NavSection[] {
-  if (role === 'admin') return [...staffSections, adminSection, ...readerNav];
-  if (role === 'librarian') return [...staffSections, ...readerNav];
-  return readerNav;
+  if (role === 'admin') return [...staffSections, adminSection, ...readerNav, accountSection];
+  if (role === 'librarian') return [...staffSections, ...readerNav, accountSection];
+  return [...readerNav, accountSection];
 }
 
 const extraTitles: Array<[RegExp, string, string]> = [

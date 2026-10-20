@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  BadgeCheck, Download, KeyRound, LogOut, Search, ShieldBan, ShieldCheck, UserRound, Users,
+  BadgeCheck, Download, KeyRound, LogOut, Search, ShieldBan, ShieldCheck, UserPlus, UserRound, Users,
 } from 'lucide-react';
 import { api, apiBlob } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -9,7 +9,8 @@ import { downloadBlob } from '../../lib/download';
 import { formatDate, formatDateTime, timeAgo } from '../../lib/format';
 import { useDebounced, useDocumentTitle } from '../../lib/hooks';
 import {
-  Avatar, Badge, Button, EmptyState, Modal, PageHeader, Pagination, StatCard, Table, Tabs, useConfirm, useToast,
+  Avatar, Badge, Button, EmptyState, Field, Input, Modal, PageHeader, Pagination, Select, StatCard, Table, Tabs,
+  useConfirm, useToast,
 } from '../../components/ui';
 
 type Kind = 'member' | 'walkin';
@@ -84,6 +85,14 @@ export function PeoplePage() {
   const [resetting, setResetting] = useState<Person | null>(null);
   const [tempPassword, setTempPassword] = useState(randomPassword);
   const [resetDone, setResetDone] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [staffForm, setStaffForm] = useState({
+    firstName: '', lastName: '', email: '', phone: '',
+    role: 'librarian' as 'admin' | 'librarian', password: randomPassword(),
+  });
+  const [staffCreated, setStaffCreated] = useState<{
+    name: string; libraryId: string; email: string; role: string; password: string;
+  } | null>(null);
 
   const { user } = useAuth();
   const toast = useToast();
@@ -142,6 +151,52 @@ export function PeoplePage() {
     onError: (error: Error) => toast.push({ tone: 'error', title: 'Could not reset the password', description: error.message }),
   });
 
+  const staffIssue = staffForm.firstName.trim().length < 2 ? 'Enter a first name.'
+    : staffForm.lastName.trim().length < 2 ? 'Enter a surname.'
+      : !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(staffForm.email.trim()) ? 'Enter a valid email address.'
+        : staffForm.password.length < 8 || !/[A-Za-z]/.test(staffForm.password) || !/[0-9]/.test(staffForm.password)
+          ? 'The password needs at least 8 characters, with a letter and a number.'
+          : null;
+
+  const createStaff = useMutation({
+    mutationFn: () => api<{ libraryId: string; password: string | null }>('/people/staff', {
+      method: 'POST',
+      body: { ...staffForm, phone: staffForm.phone.trim() || null },
+    }),
+    onSuccess: (result) => {
+      setStaffCreated({
+        name: `${staffForm.firstName.trim()} ${staffForm.lastName.trim()}`.trim(),
+        libraryId: result.libraryId,
+        email: staffForm.email.trim().toLowerCase(),
+        role: staffForm.role,
+        password: result.password ?? staffForm.password,
+      });
+      refresh();
+    },
+    onError: (error: Error) => toast.push({ tone: 'error', title: 'Could not create that account', description: error.message }),
+  });
+
+  const openAddStaff = () => {
+    setStaffForm({ firstName: '', lastName: '', email: '', phone: '', role: 'librarian', password: randomPassword() });
+    setStaffCreated(null);
+    setAdding(true);
+  };
+
+  const closeAddStaff = () => {
+    setAdding(false);
+    setStaffCreated(null);
+  };
+
+  const copyStaffPassword = async () => {
+    if (!staffCreated) return;
+    try {
+      await navigator.clipboard.writeText(staffCreated.password);
+      toast.push({ tone: 'success', title: 'Password copied' });
+    } catch {
+      toast.push({ tone: 'error', title: 'Copy failed', description: 'Select the password and copy it manually.' });
+    }
+  };
+
   const exportCsv = async () => {
     try {
       const blob = await apiBlob(`/people/export.csv?kind=${kind}&q=${encodeURIComponent(debounced)}`);
@@ -195,7 +250,12 @@ export function PeoplePage() {
         eyebrow="Administration"
         title="Everyone the library knows"
         description="Registered members and kiosk-only visitors in one register. Search a name, check who has been in, and manage an account when it is needed."
-        actions={<Button variant="secondary" icon={Download} onClick={exportCsv}>Export CSV</Button>}
+        actions={(
+          <>
+            <Button icon={UserPlus} onClick={openAddStaff}>Add staff account</Button>
+            <Button variant="secondary" icon={Download} onClick={exportCsv}>Export CSV</Button>
+          </>
+        )}
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -526,6 +586,106 @@ export function PeoplePage() {
             <p className="text-[11.5px] leading-relaxed text-ink/45">
               At least 8 characters with a letter and a number. The member keeps their library ID.
             </p>
+          </div>
+        )}
+      </Modal>
+
+      {/* Add staff account */}
+      <Modal
+        open={adding}
+        onClose={closeAddStaff}
+        title={staffCreated ? 'Staff account ready' : 'Add a staff account'}
+        description={staffCreated
+          ? 'Hand these sign-in details over directly. The password is shown once and can be changed from Account settings.'
+          : 'Administrators and librarians can run the front desk, sign visitors in and upload books.'}
+        size="md"
+        footer={staffCreated ? (
+          <Button onClick={closeAddStaff}>Done</Button>
+        ) : (
+          <>
+            <Button variant="ghost" onClick={closeAddStaff}>Cancel</Button>
+            <Button icon={UserPlus} loading={createStaff.isPending} disabled={Boolean(staffIssue)} onClick={() => createStaff.mutate()}>
+              Create account
+            </Button>
+          </>
+        )}
+      >
+        {staffCreated ? (
+          <div className="space-y-3">
+            <div className="rounded-xl border border-forest-600/25 bg-forest-50 px-4 py-3">
+              <p className="text-[10.5px] font-bold uppercase tracking-[0.13em] text-forest-900/60">Library ID</p>
+              <code className="mt-1 block select-all text-[15px] font-semibold tracking-wide text-forest-900">{staffCreated.libraryId}</code>
+              <p className="mt-1 text-[12px] text-forest-900/70">
+                {staffCreated.email} · {staffCreated.role === 'admin' ? 'Administrator' : 'Librarian'}
+              </p>
+            </div>
+            <div className="flex items-center justify-between gap-2 rounded-xl border border-ink/15 bg-parchment-light px-3 py-3">
+              <code className="select-all break-all text-[15px] font-semibold tracking-wide text-ink">{staffCreated.password}</code>
+              <Button size="sm" variant="secondary" onClick={copyStaffPassword}>Copy</Button>
+            </div>
+            <p className="text-[12px] leading-relaxed text-ink-mute">
+              {staffCreated.name} signs in at <strong>/login</strong> with the library ID or email and this password, then changes it in Account settings.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Input
+                label="First name"
+                value={staffForm.firstName}
+                onChange={(event) => setStaffForm({ ...staffForm, firstName: event.target.value })}
+                autoComplete="off"
+              />
+              <Input
+                label="Surname"
+                value={staffForm.lastName}
+                onChange={(event) => setStaffForm({ ...staffForm, lastName: event.target.value })}
+                autoComplete="off"
+              />
+            </div>
+            <Input
+              label="Email (their username)"
+              type="email"
+              hint="They can also sign in with the library ID issued below."
+              value={staffForm.email}
+              onChange={(event) => setStaffForm({ ...staffForm, email: event.target.value })}
+              autoComplete="off"
+            />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Input
+                label="Phone"
+                type="tel"
+                hint="Optional."
+                value={staffForm.phone}
+                onChange={(event) => setStaffForm({ ...staffForm, phone: event.target.value })}
+                autoComplete="off"
+              />
+              <Select
+                label="Role"
+                value={staffForm.role}
+                onChange={(event) => setStaffForm({ ...staffForm, role: event.target.value as 'admin' | 'librarian' })}
+              >
+                <option value="librarian">Librarian — front desk and books</option>
+                <option value="admin">Administrator — everything</option>
+              </Select>
+            </div>
+            <Field
+              label="Starting password"
+              hint="At least 8 characters with a letter and a number. They can change it after signing in."
+              error={staffIssue ?? undefined}
+            >
+              <div className="flex gap-2">
+                <input
+                  value={staffForm.password}
+                  onChange={(event) => setStaffForm({ ...staffForm, password: event.target.value })}
+                  className="field-input flex-1 font-mono text-[13px]"
+                  autoComplete="new-password"
+                />
+                <Button variant="secondary" onClick={() => setStaffForm({ ...staffForm, password: randomPassword() })}>
+                  Generate
+                </Button>
+              </div>
+            </Field>
           </div>
         )}
       </Modal>

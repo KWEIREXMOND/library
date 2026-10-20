@@ -22,8 +22,8 @@ describe('navForRole', () => {
   });
 
   it('gives readers the shelf and their inbox', () => {
-    expect(labels('student')).toEqual(['Online library', 'My inbox']);
-    expect(labels('teacher')).toEqual(['Online library', 'My inbox']);
+    expect(labels('student')).toEqual(['Online library', 'My inbox', 'Account settings']);
+    expect(labels('teacher')).toEqual(['Online library', 'My inbox', 'Account settings']);
   });
 
   it('names the new pages in the header', () => {
@@ -32,5 +32,6 @@ describe('navForRole', () => {
     expect(findNavContext('/app/settings', 'admin')).toEqual({ title: 'Site settings', section: 'Administration' });
     expect(findNavContext('/app/notifications', 'student')).toEqual({ title: 'My inbox', section: 'Read' });
     expect(findNavContext('/app/notifications', 'admin')).toEqual({ title: 'Inbox', section: 'Library' });
+    expect(findNavContext('/app/account', 'student')).toEqual({ title: 'Account settings', section: 'Account' });
   });
 });

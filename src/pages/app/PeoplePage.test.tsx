@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -65,14 +65,14 @@ const detail = vi.hoisted(() => ({
   ],
 }));
 
-const apiMock = vi.fn(async (path: string) => {
+const apiMock = vi.fn(async (path: string, _init?: unknown): Promise<any> => {
   if (path.startsWith('/people/member/')) return detail;
   if (path.startsWith('/people?')) return payload;
   return {};
 });
 
 vi.mock('../../lib/api', () => ({
-  api: (path: string) => apiMock(path),
+  api: (path: string, init?: unknown) => apiMock(path, init),
   apiBlob: vi.fn(async () => new Blob(['a,b'])),
   ApiError: class ApiError extends Error {},
 }));
@@ -138,5 +138,35 @@ describe('PeoplePage', () => {
     await vi.waitFor(() => {
       expect(apiMock.mock.calls.some(([path]) => String(path).includes('q=esi'))).toBe(true);
     });
+  });
+  it('creates a librarian account and shows the sign-in details once', async () => {
+    const user = userEvent.setup();
+    apiMock.mockImplementation(async (path: string) => {
+      if (path === '/people/staff') return { user: {}, libraryId: 'LIB-2026-0060', password: null, generated: false };
+      if (path.startsWith('/people/member/')) return detail;
+      if (path.startsWith('/people?')) return payload;
+      return {};
+    });
+    renderPage();
+    await screen.findAllByText('Ama Boateng');
+
+    await user.click(screen.getByRole('button', { name: /add staff account/i }));
+    await user.type(screen.getByLabelText('First name'), 'Yaw');
+    await user.type(screen.getByLabelText('Surname'), 'Owusu');
+    await user.type(screen.getByLabelText(/email \(their username\)/i), 'yaw.owusu@tema.edu.gh');
+    await user.click(screen.getByRole('button', { name: /create account/i }));
+
+    await waitFor(() => expect(apiMock).toHaveBeenCalledWith('/people/staff', expect.objectContaining({
+      method: 'POST',
+      body: expect.objectContaining({
+        firstName: 'Yaw',
+        lastName: 'Owusu',
+        email: 'yaw.owusu@tema.edu.gh',
+        role: 'librarian',
+      }),
+    })));
+
+    expect(await screen.findByText('LIB-2026-0060')).toBeTruthy();
+    expect(screen.getByText(/Staff account ready/i)).toBeTruthy();
   });
 });

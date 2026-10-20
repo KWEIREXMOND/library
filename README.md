@@ -128,7 +128,8 @@ Passwords changed in the running app (Administration → People → reset passwo
 | `/app/books` | Staff | Upload, edit, publish and delete books |
 | `/app/analytics` | Staff | Walk-in traffic, houses, peak hours, reading and members |
 | `/app/notifications` | Signed-in | The inbox: broadcasts and account notices |
-| `/app/people` | Admin | Every member and kiosk-only visitor, with account actions |
+| `/app/account` | Signed-in | Your name, username (email), phone and password |
+| `/app/people` | Admin | Everyone the library knows, plus **Add staff account** (administrator/librarian) and account actions |
 | `/app/broadcast` | Admin | Compose a notice, target an audience, see delivery and read counts |
 | `/app/activity` | Admin | The audit trail: sign-ins, account changes, broadcasts |
 | `/app/settings` | Admin | Site name, description, motto and crest/favicon |

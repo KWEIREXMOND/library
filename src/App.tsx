@@ -20,6 +20,7 @@ import { BroadcastPage } from './pages/app/BroadcastPage';
 import { NotificationsPage } from './pages/app/NotificationsPage';
 import { ActivityPage } from './pages/app/ActivityPage';
 import { SettingsPage } from './pages/app/SettingsPage';
+import { AccountPage } from './pages/app/AccountPage';
 
 function AppHome() {
   const { user } = useAuth();
@@ -58,6 +59,7 @@ export default function App() {
           <Route element={<AppShell />}>
             <Route index element={<AppHome />} />
             <Route path="notifications" element={<NotificationsPage />} />
+            <Route path="account" element={<AccountPage />} />
             <Route element={<RequireAdmin />}>
               <Route path="people" element={<PeoplePage />} />
               <Route path="broadcast" element={<BroadcastPage />} />

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ChevronDown, DoorOpen, LayoutDashboard, LibraryBig, LogOut } from 'lucide-react';
+import { ChevronDown, DoorOpen, LayoutDashboard, LibraryBig, LogOut, UserCog } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 import { Avatar, cn } from './ui';
 
@@ -112,6 +112,13 @@ export function AccountMenu({ tone = 'light' }: { tone?: 'light' | 'dark' }) {
                 <DoorOpen className="h-3.5 w-3.5 text-ink/40" /> Kiosk screen
               </Link>
             ) : null}
+            <Link
+              to="/app/account"
+              role="menuitem"
+              className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-[12.5px] font-medium text-ink-soft transition hover:bg-ink/[0.05] hover:text-ink"
+            >
+              <UserCog className="h-3.5 w-3.5 text-ink/40" /> Account settings
+            </Link>
           </div>
 
           <div className="border-t border-ink/10 p-1.5">

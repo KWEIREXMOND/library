@@ -1,9 +1,10 @@
 import { Router } from 'express';
+import crypto from 'node:crypto';
 import { z } from 'zod';
-import { all, get, nowIso, run, scalar } from '../db.js';
+import { all, get, nextLibraryId, nowIso, run, scalar } from '../db.js';
 import { hashPassword, requireAdmin } from '../auth.js';
 import {
-  asyncH, audit, badRequest, cleanSearch, conflict, notFound, notifyMany, paginated, pagination, parse,
+  asyncH, audit, badRequest, cleanSearch, conflict, notFound, notifyMany, paginated, pagination, parse, publicUser,
 } from '../http.js';
 
 const router = Router();
@@ -209,6 +210,67 @@ router.post('/people/:id/reset-password', requireAdmin, asyncH(async (req, res) 
     summary: `Reset the password for ${user.first_name} ${user.last_name}`,
   });
   res.json({ ok: true });
+}));
+
+/**
+ * Admin: open a new staff account.
+ *
+ * The school only hands out two privileged roles, so this endpoint accepts
+ * exactly those two. The library ID is issued from the same sequence as every
+ * reader, and when no password is supplied one is generated and returned once.
+ */
+const staffSchema = z.object({
+  firstName: z.string().trim().min(2, 'Enter a first name.').max(60),
+  lastName: z.string().trim().min(2, 'Enter a surname.').max(60),
+  email: z.string().trim().email('Enter a valid email address.').max(160),
+  phone: z.string().trim().max(30).optional().nullable(),
+  role: z.enum(['admin', 'librarian']),
+  password: z.string().min(8, 'Use at least 8 characters.')
+    .regex(/[A-Za-z]/, 'Include a letter.')
+    .regex(/[0-9]/, 'Include a number.')
+    .optional(),
+});
+
+function generatePassword(): string {
+  const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  const digits = '23456789';
+  const pick = (alphabet: string, count: number) =>
+    Array.from({ length: count }, () => alphabet[crypto.randomInt(alphabet.length)]).join('');
+  return `${pick(letters, 10)}${pick(digits, 4)}`;
+}
+
+router.post('/people/staff', requireAdmin, asyncH(async (req, res) => {
+  const data = parse(staffSchema, req.body);
+  const email = data.email.toLowerCase();
+  const clash = await get<any>('SELECT id FROM users WHERE LOWER(email) = ?', [email]);
+  if (clash) throw conflict('An account with that email address already exists.');
+
+  const password = data.password ?? generatePassword();
+  const libraryId = await nextLibraryId();
+  const stamp = nowIso();
+  const department = data.role === 'admin' ? 'Administration' : 'Library';
+  const result = await run(
+    `INSERT INTO users (school_id, library_id, email, password_hash, first_name, last_name, role, status,
+       department, phone, avatar_hue, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
+    [libraryId, libraryId, email, hashPassword(password), data.firstName, data.lastName, data.role,
+      department, data.phone ?? null, crypto.randomInt(360), stamp, stamp]
+  );
+  await audit({
+    userId: req.user!.id,
+    action: 'user.create',
+    entityType: 'user',
+    entityId: result.lastInsertRowid,
+    summary: `Created ${data.role === 'admin' ? 'an administrator' : 'a librarian'} account for ${data.firstName} ${data.lastName} (${libraryId})`,
+  });
+  const row = await get<any>('SELECT * FROM users WHERE id = ?', [result.lastInsertRowid]);
+  res.status(201).json({
+    user: publicUser(row),
+    libraryId,
+    // The generated password is shown once; a supplied one is already known.
+    password: data.password ? null : password,
+    generated: !data.password,
+  });
 }));
 
 /** Admin: sign someone out of every device without changing their password. */
