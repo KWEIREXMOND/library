@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { handleUpload, type HandleUploadBody } from '@vercel/blob/client';
-import { requireAuth, requireStaff } from '../auth.js';
+import { requireStaff } from '../auth.js';
 import { asyncH, badRequest } from '../http.js';
 import { blobMode } from '../blob.js';
 
@@ -24,9 +24,16 @@ router.get('/uploads/mode', requireStaff, (_req, res) => {
  * Vercel Blob. That keeps big PDFs (up to 60 MB) away from the 4.5 MB serverless
  * request limit; the API only ever receives the resulting URL.
  */
-router.post('/uploads/token', requireAuth, asyncH(async (req, res) => {
+router.post('/uploads/token', asyncH(async (req, res) => {
   if (!blobMode()) throw badRequest('File storage is not configured on this server.');
-  const body = req.body as HandleUploadBody;
+  const body = req.body as HandleUploadBody & { type?: string };
+  // Blob calls this URL back after a finished upload to run onUploadCompleted.
+  // That request is signed by Vercel, not by a user session, so it has no cookie.
+  const isCallback = body?.type === 'blob.upload-completed';
+  if (!isCallback && !req.user) {
+    res.status(401).json({ error: 'Sign in to upload files.' });
+    return;
+  }
 
   const jsonResponse = await handleUpload({
     body,

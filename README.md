@@ -58,6 +58,9 @@ NODE_ENV=production \
 | `COOKIE_SECURE` | `false` | Set `true` when the site is served over HTTPS. |
 | `ALLOWED_ORIGINS` | — | Extra browser origins for the API, comma separated. |
 | `AUTO_SEED` | `true` | On an empty database, create the demo library. Set `false` after launch. |
+| `LIBSQL_URL` / `TURSO_DATABASE_URL` | — | Hosted libSQL database. Without it the app uses `DATA_DIR/libra.db`. |
+| `LIBSQL_AUTH_TOKEN` / `TURSO_AUTH_TOKEN` | — | Token for the hosted database. |
+| `BLOB_STORE_ID` | — | Connected Vercel Blob store; enables browser-direct uploads. |
 
 **Docker**
 
@@ -81,6 +84,28 @@ use `GET /api/health` (returns `{ ok: true, database: "ready" }`).
 
 Hashed files under `/assets/` are served with a one-year immutable cache; `index.html` is not cached,
 so a new build is picked up immediately. Responses are gzip-compressed.
+
+**Vercel**
+
+The repository ships a serverless entry point — `api/index.ts` plus `vercel.json` — so the same Express
+app runs as a Vercel function while the built client is served from the CDN. Everything writable is
+remote: rows live in a hosted libSQL database (Turso) and files live in Vercel Blob.
+
+1. Import the repository as a Vercel project. The build command is `npm run build` and the output
+   directory is `dist` (both are set in `vercel.json`).
+2. **Storage → Create → Turso** (Vercel Marketplace). Connecting it to the project injects
+   `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`; `LIBSQL_URL` / `LIBSQL_AUTH_TOKEN` are accepted too.
+3. **Storage → Create → Blob**, connected to the same project (`BLOB_STORE_ID` and
+   `BLOB_WEBHOOK_PUBLIC_KEY`). Uploads then go browser → Blob directly, because a serverless request
+   body is capped at 4.5 MB while a book PDF may be 60 MB.
+4. Set `SESSION_SECRET`, `COOKIE_SECURE=true`, `ALLOWED_ORIGINS=https://<your-domain>` and
+   `AUTO_SEED=false`.
+5. Deploy. The first request builds the schema and, on a hosted database, restores the school's five
+   accounts and the reference lists from `server/seed/hosted.ts`. A `hostedSeed` row in `settings`
+   makes that bootstrap run once per database; bump `VERSION` in that file if you ever need it again.
+
+Passwords changed in the running app (Administration → People → reset password) are written to Turso.
+`hosted.ts` is the disaster-recovery snapshot, not the live copy.
 
 **Before you hand it over**
 

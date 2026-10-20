@@ -73,8 +73,14 @@ const signInSchema = z.object({
   fullName: z.string().trim().min(2, 'Enter your full name.').max(120),
   // Class is typed by the member of staff running the kiosk, e.g. "2 Science 1".
   className: z.string().trim().max(60).optional().nullable(),
-  // The house is always one of four; stored as "House 1" … "House 4".
-  house: z.string().trim().regex(/^[1-5]$/, 'Choose House 1, 2, 3, 4 or 5.').optional().nullable().or(z.literal('')),
+  // Stored as "House 1" … "House 5". Accept either "3" or "House 3" so an older
+  // client (or a hand-written request) cannot be rejected over formatting.
+  house: z.preprocess((value) => {
+    if (typeof value !== 'string') return value;
+    const text = value.trim();
+    const match = text.match(/^(?:house\s*)?([1-5])$/i);
+    return match ? match[1] : text;
+  }, z.string().regex(/^[1-5]$/, 'Choose House 1, 2, 3, 4 or 5.').optional().nullable().or(z.literal(''))),
   itemBrought: z.string().trim().max(120).optional().nullable(),
   purpose: z.string().trim().max(60).optional().nullable(),
   email: z.string().trim().email('Enter a valid email address.').max(160).optional().nullable().or(z.literal('')),
