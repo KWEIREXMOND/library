@@ -1,0 +1,144 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-parchment font-sans text-ink antialiased;
+    background-image:
+      radial-gradient(1200px 600px at 85% -10%, rgba(207, 160, 67, 0.10), transparent 60%),
+      radial-gradient(900px 600px at -10% 10%, rgba(31, 74, 53, 0.07), transparent 55%);
+    background-attachment: fixed;
+  }
+  ::selection {
+    background: #ebd49a;
+    color: #10241c;
+  }
+  h1, h2, h3, h4 {
+    @apply font-display;
+    font-variation-settings: 'opsz' 48;
+    letter-spacing: -0.015em;
+  }
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+  input, select, textarea, button {
+    font: inherit;
+  }
+  :focus-visible {
+    outline: 2px solid #b98631;
+    outline-offset: 2px;
+  }
+  ::-webkit-scrollbar {
+    width: 11px;
+    height: 11px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(31, 74, 53, 0.22);
+    border-radius: 999px;
+    border: 3px solid #f7f3ea;
+  }
+}
+
+@layer components {
+  .container-x {
+    @apply mx-auto w-full max-w-[1240px] px-5 sm:px-8;
+  }
+  .card {
+    @apply rounded-2xl border border-ink/10 bg-white/70 shadow-card;
+  }
+  .card-solid {
+    @apply rounded-2xl border border-ink/10 bg-white shadow-card;
+  }
+  .eyebrow {
+    @apply text-[11px] font-semibold uppercase tracking-[0.18em] text-forest-600;
+  }
+  .field-label {
+    @apply mb-1.5 block text-[13px] font-semibold text-ink-soft;
+  }
+  .field-input {
+    @apply w-full rounded-xl border border-ink/15 bg-white px-3.5 py-2.5 text-[14px] text-ink shadow-sm transition placeholder:text-ink/35 focus:border-forest-500 focus:ring-4 focus:ring-forest-500/10 disabled:cursor-not-allowed disabled:bg-ink/5;
+  }
+  .table-wrap {
+    @apply w-full overflow-x-auto;
+  }
+  .data-table {
+    @apply w-full min-w-[680px] border-collapse text-left text-[13.5px];
+  }
+  .data-table thead th {
+    @apply whitespace-nowrap border-b border-ink/10 bg-parchment-deep/60 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-mute;
+  }
+  .data-table tbody td {
+    @apply border-b border-ink/[0.06] px-4 py-3 align-middle text-ink-soft;
+  }
+  .data-table tbody tr:hover {
+    background: rgba(31, 74, 53, 0.025);
+  }
+  .link-underline {
+    background-image: linear-gradient(currentColor, currentColor);
+    background-size: 0% 1px;
+    background-repeat: no-repeat;
+    background-position: 0 100%;
+    transition: background-size 0.25s ease;
+  }
+  .link-underline:hover {
+    background-size: 100% 1px;
+  }
+  .bg-grain {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.35'/%3E%3C/svg%3E");
+    background-size: 140px 140px;
+  }
+  .arch-mask {
+    mask-image: radial-gradient(120% 90% at 50% 100%, #000 55%, transparent 100%);
+  }
+  .prose-library p {
+    @apply mb-4 leading-relaxed text-ink-soft;
+  }
+  .prose-library h3 {
+    @apply mb-2 mt-6 text-xl text-ink;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .animate-delay-1 { animation-delay: 80ms; }
+  .animate-delay-2 { animation-delay: 160ms; }
+  .animate-delay-3 { animation-delay: 240ms; }
+  .animate-delay-4 { animation-delay: 320ms; }
+}
+
+@media print {
+  body {
+    background: #fff !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-block {
+    display: block !important;
+  }
+  .print-area {
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .card, .card-solid {
+    box-shadow: none !important;
+    border-color: #ccc !important;
+  }
+}
