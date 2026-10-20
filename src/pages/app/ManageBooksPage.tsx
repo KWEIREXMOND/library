@@ -8,6 +8,7 @@ import {
 import { api, ApiError } from '../../lib/api';
 import { fileSize, timeAgo } from '../../lib/format';
 import { useDebounced, useDocumentTitle } from '../../lib/hooks';
+import { storageMode, uploadToBlob } from '../../lib/uploads';
 import { BookCover } from '../../components/BookCover';
 import {
   Alert, Badge, Button, Checkbox, EmptyState, Field, Input, Modal, PageHeader, Pagination,
@@ -135,13 +136,32 @@ export function ManageBooksPage() {
 
   const save = useMutation({
     mutationFn: async () => {
+      const meta = {
+        title: form.title.trim(),
+        ...(form.author.trim() ? { author: form.author.trim() } : {}),
+        ...(form.category ? { category: form.category } : {}),
+        ...(form.publishedYear ? { publishedYear: form.publishedYear } : {}),
+        ...(form.description.trim() ? { description: form.description.trim() } : {}),
+        allowDownload: form.allowDownload,
+      };
+
+      // Hosted: send files straight to Vercel Blob, then save the URLs.
+      if ((await storageMode()) === 'blob') {
+        const [uploadedPdf, uploadedCover] = await Promise.all([
+          pdf ? uploadToBlob(pdf, 'book') : null,
+          cover ? uploadToBlob(cover, 'cover') : null,
+        ]);
+        const payload = {
+          ...meta,
+          ...(uploadedPdf ? { fileUrl: uploadedPdf.url, fileName: uploadedPdf.name, fileSize: uploadedPdf.size } : {}),
+          ...(uploadedCover ? { coverUrl: uploadedCover.url } : {}),
+        };
+        if (editing) return api(`/books/${editing.id}`, { method: 'PATCH', body: payload });
+        return api('/books', { method: 'POST', body: payload });
+      }
+
       const body = new FormData();
-      body.append('title', form.title.trim());
-      if (form.author.trim()) body.append('author', form.author.trim());
-      if (form.category) body.append('category', form.category);
-      if (form.publishedYear) body.append('publishedYear', form.publishedYear);
-      if (form.description.trim()) body.append('description', form.description.trim());
-      body.append('allowDownload', form.allowDownload ? 'true' : 'false');
+      for (const [key, value] of Object.entries(meta)) body.append(key, String(value));
       if (pdf) body.append('file', pdf);
       if (cover) body.append('cover', cover);
       if (editing) return api(`/books/${editing.id}`, { method: 'PATCH', body });

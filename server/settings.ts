@@ -94,6 +94,9 @@ export async function loadSettings(): Promise<Settings> {
   const rows = await all<{ key: string; value: string }>('SELECT key, value FROM settings');
   const values: Record<string, unknown> = { ...DEFAULT_SETTINGS };
   for (const row of rows) {
+    // Internal bookkeeping rows (such as the hosted-seed marker) must never be
+    // returned to the browser as if they were site settings.
+    if (!(row.key in DEFAULT_SETTINGS)) continue;
     try {
       values[row.key] = JSON.parse(row.value);
     } catch {

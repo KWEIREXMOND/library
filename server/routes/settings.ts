@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { BRAND_DIR } from '../db.js';
+import { deleteBlob, isBlobUrl } from '../blob.js';
 import { requireAdmin } from '../auth.js';
 import { getSettings, updateSettings } from '../settings.js';
 import { asyncH, audit, badRequest, parse } from '../http.js';
@@ -79,6 +80,23 @@ function removeBrandingFile(url: string | null | undefined) {
 
 /** Upload the crest. It is used in the header and as the browser favicon. */
 router.post('/logo', requireAdmin, upload.single('logo'), asyncH(async (req, res) => {
+  // Hosted deployments upload the crest straight to Vercel Blob and send the URL.
+  const uploadedUrl = (req.body as { logoUrl?: string })?.logoUrl;
+  if (!req.file && isBlobUrl(uploadedUrl)) {
+    const previous = getSettings().logoUrl;
+    const settings = await updateSettings({ logoUrl: uploadedUrl });
+    removeBrandingFile(previous);
+    await deleteBlob(previous);
+    await audit({
+      userId: req.user!.id,
+      action: 'settings.logo',
+      entityType: 'settings',
+      entityId: null,
+      summary: 'Uploaded a new site crest and favicon',
+    });
+    res.status(201).json({ settings });
+    return;
+  }
   const file = req.file;
   if (!file) throw badRequest('Choose an image to upload.', { logo: 'An image file is required.' });
   const kind = imageKind(file.buffer);
@@ -89,6 +107,7 @@ router.post('/logo', requireAdmin, upload.single('logo'), asyncH(async (req, res
   fs.writeFileSync(path.join(BRAND_DIR, name), file.buffer);
   const settings = await updateSettings({ logoUrl: `/api/media/branding/${name}` });
   removeBrandingFile(previous);
+  await deleteBlob(previous);
   await audit({
     userId: req.user!.id,
     action: 'settings.logo',
@@ -103,6 +122,7 @@ router.delete('/logo', requireAdmin, asyncH(async (req, res) => {
   const previous = getSettings().logoUrl;
   const settings = await updateSettings({ logoUrl: '' });
   removeBrandingFile(previous);
+  await deleteBlob(previous);
   await audit({
     userId: req.user!.id,
     action: 'settings.logo',

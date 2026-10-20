@@ -4,6 +4,7 @@ import { ImagePlus, RotateCcw, Save, Trash2, UploadCloud } from 'lucide-react';
 import { api, ApiError } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { useDocumentTitle } from '../../lib/hooks';
+import { storageMode, uploadToBlob } from '../../lib/uploads';
 import type { Settings } from '../../lib/types';
 import { LogoMark } from '../../components/Brand';
 import {
@@ -102,9 +103,14 @@ export function SettingsPage() {
     }
     setUploading(true);
     try {
-      const body = new FormData();
-      body.append('logo', file);
-      await api<BrandingResponse>('/settings/logo', { method: 'POST', body });
+      if ((await storageMode()) === 'blob') {
+        const uploaded = await uploadToBlob(file, 'logo');
+        await api<BrandingResponse>('/settings/logo', { method: 'POST', body: { logoUrl: uploaded.url } });
+      } else {
+        const body = new FormData();
+        body.append('logo', file);
+        await api<BrandingResponse>('/settings/logo', { method: 'POST', body });
+      }
       await refresh();
       toast.push({ tone: 'success', title: 'Crest updated', description: 'It is now the site icon and the favicon.' });
     } catch (error) {

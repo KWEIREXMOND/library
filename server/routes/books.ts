@@ -6,6 +6,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { all, COVER_DIR, get, nowIso, RESOURCE_DIR, run, scalar } from '../db.js';
 import { requireAuth, requireStaff } from '../auth.js';
+import { deleteBlob, isBlobUrl } from '../blob.js';
 import {
   asyncH, audit, badRequest, cleanSearch, conflict, notFound, paginated, pagination, parse,
 } from '../http.js';
@@ -180,14 +181,22 @@ router.get('/books/:id/file', requireAuth, asyncH(async (req, res) => {
   if (!book) throw notFound('Book not found.');
   if (book.status !== 'approved' && !['librarian', 'admin'].includes(req.user!.role)) throw notFound('Book not found.');
   if (!book.file_key) throw notFound('This book has no file attached.');
-  const safe = path.basename(String(book.file_key));
-  const full = path.join(RESOURCE_DIR, safe);
-  if (!full.startsWith(RESOURCE_DIR) || !fs.existsSync(full)) throw notFound('The book file is missing. Please ask the library to upload it again.');
   const download = req.query.mode === 'download';
   if (download && !book.allow_download) throw badRequest('Downloads are switched off for this book. You can still read it online.');
   if (download) {
     await run('UPDATE resources SET download_count = download_count + 1 WHERE id = ?', [id]);
   }
+  // Hosted uploads live in Vercel Blob; the file itself is served from there.
+  if (isBlobUrl(book.file_key)) {
+    const target = new URL(book.file_key);
+    if (download) target.searchParams.set('download', '1');
+    res.setHeader('Cache-Control', 'private, max-age=600');
+    res.redirect(302, target.toString());
+    return;
+  }
+  const safe = path.basename(String(book.file_key));
+  const full = path.join(RESOURCE_DIR, safe);
+  if (!full.startsWith(RESOURCE_DIR) || !fs.existsSync(full)) throw notFound('The book file is missing. Please ask the library to upload it again.');
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename="${encodeURIComponent(book.file_name || `${book.title}.pdf`)}"`);
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -213,13 +222,21 @@ function allowDownloadValue(value: unknown, fallback = true): number {
 
 router.post('/books', requireStaff, fields, asyncH(async (req, res) => {
   const data = parse(bookFields, req.body);
+  const body = req.body as Record<string, string | undefined>;
   const files = req.files as Uploaded | undefined;
   const pdf = files?.file?.[0];
   const cover = files?.cover?.[0];
-  if (!pdf) throw badRequest('Choose the book PDF to upload.', { file: 'A PDF file is required.' });
-  if (!isPdf(pdf.buffer)) throw badRequest('That file is not a valid PDF.');
-  const fileKey = saveFile(pdf.buffer);
+  const uploadedUrl = isBlobUrl(body.fileUrl) ? body.fileUrl : null;
+  const uploadedCover = isBlobUrl(body.coverUrl) ? body.coverUrl : null;
+  if (!pdf && !uploadedUrl) throw badRequest('Choose the book PDF to upload.', { file: 'A PDF file is required.' });
+  if (pdf && !isPdf(pdf.buffer)) throw badRequest('That file is not a valid PDF.');
+  const fileKey = pdf ? saveFile(pdf.buffer) : uploadedUrl!;
+  const fileName = pdf
+    ? path.basename(pdf.originalname).slice(0, 180)
+    : String(body.fileName || `${data.title}.pdf`).slice(0, 180);
+  const fileSize = pdf ? pdf.size : Number(body.fileSize) || null;
   const coverName = cover ? saveCover(cover.buffer) : null;
+  const coverUrl = coverName ? `/api/media/covers/${coverName}` : uploadedCover;
   const stamp = nowIso();
   const result = await run(
     `INSERT INTO resources (title, description, kind, author, published_year, language, file_key, file_name,
@@ -228,8 +245,8 @@ router.post('/books', requireStaff, fields, asyncH(async (req, res) => {
      VALUES (?, ?, 'ebook', ?, ?, ?, ?, ?, 'application/pdf', ?, '#1F4A35', ?, ?, ?, 'all', ?, ?, ?, ?, ?, ?)`,
     [
       data.title, data.description ?? null, data.author ?? null, data.publishedYear ?? null,
-      data.language ?? 'English', fileKey, path.basename(pdf.originalname).slice(0, 180), pdf.size,
-      coverName ? `/api/media/covers/${coverName}` : null, data.category ?? null,
+      data.language ?? 'English', fileKey, fileName, fileSize,
+      coverUrl, data.category ?? null,
       allowDownloadValue(data.allowDownload), data.status ?? 'approved', req.user!.id, req.user!.id,
       (data.status ?? 'approved') === 'approved' ? stamp : null, stamp, stamp,
     ]
@@ -265,6 +282,7 @@ router.patch('/books/:id', requireStaff, fields, asyncH(async (req, res) => {
     params.push(req.user!.id, nowIso());
   }
 
+  const body = req.body as Record<string, string | undefined>;
   const pdf = files?.file?.[0];
   if (pdf) {
     if (!isPdf(pdf.buffer)) throw badRequest('That file is not a valid PDF.');
@@ -272,6 +290,15 @@ router.patch('/books/:id', requireStaff, fields, asyncH(async (req, res) => {
     if (book.file_key) removeFile(book.file_key);
     sets.push('file_key = ?', 'file_name = ?', 'file_mime = ?', 'file_size = ?');
     params.push(key, path.basename(pdf.originalname).slice(0, 180), 'application/pdf', pdf.size);
+  } else if (isBlobUrl(body.fileUrl)) {
+    await deleteBlob(book.file_key);
+    sets.push('file_key = ?', 'file_name = ?', 'file_mime = ?', 'file_size = ?');
+    params.push(
+      body.fileUrl,
+      String(body.fileName || `${data.title ?? book.title}.pdf`).slice(0, 180),
+      'application/pdf',
+      Number(body.fileSize) || null
+    );
   }
   const cover = files?.cover?.[0];
   if (cover) {
@@ -279,6 +306,10 @@ router.patch('/books/:id', requireStaff, fields, asyncH(async (req, res) => {
     if (book.cover_url?.startsWith('/api/media/covers/')) removeFile(book.cover_url.split('/').pop(), COVER_DIR);
     sets.push('cover_url = ?');
     params.push(`/api/media/covers/${name}`);
+  } else if (isBlobUrl(body.coverUrl)) {
+    await deleteBlob(book.cover_url);
+    sets.push('cover_url = ?');
+    params.push(body.coverUrl);
   }
 
   if (!sets.length) throw badRequest('Nothing to update.');
@@ -295,6 +326,8 @@ router.delete('/books/:id', requireStaff, asyncH(async (req, res) => {
   if (!book) throw notFound('Book not found.');
   removeFile(book.file_key);
   if (book.cover_url?.startsWith('/api/media/covers/')) removeFile(book.cover_url.split('/').pop(), COVER_DIR);
+  await deleteBlob(book.file_key);
+  await deleteBlob(book.cover_url);
   await run('DELETE FROM resource_events WHERE resource_id = ?', [id]);
   await run('DELETE FROM resource_favorites WHERE resource_id = ?', [id]);
   await run('DELETE FROM resources WHERE id = ?', [id]);
