@@ -13,7 +13,7 @@ const VERSION = 1;
 const MARKER_KEY = 'hostedSeed';
 
 export type HostedUser = {
-  id: number; schoolId: string; libraryId: string; email: string; hash: string;
+  id: number; schoolId: string; libraryId: string; email: string; username: string; hash: string;
   first: string; last: string; role: string; status: string;
   className: string | null; programme: string | null; department: string | null;
   phone: string | null; gender: string | null; house: string | null; hue: number;
@@ -389,6 +389,7 @@ export const HOSTED_USERS: HostedUser[] = [
     schoolId: "ADM-001",
     libraryId: "LIB-2026-0001",
     email: "admin@tema.edu.gh",
+    username: "admin",
     hash: "$2a$10$zs5PxJM6CR4Tc4/tCnrj5euemFLzm0lekeetDEpIdSWRd/n/Uuac.",
     first: "Akosua",
     last: "Mensah",
@@ -409,6 +410,7 @@ export const HOSTED_USERS: HostedUser[] = [
     schoolId: "LIB-001",
     libraryId: "LIB-2026-0002",
     email: "librarian@tema.edu.gh",
+    username: "librarian",
     hash: "$2a$10$SufUCWDQ0v9D3y54wKe4tOumWvjnJI9H/Z4Nl7yjZZOS57Q4f1YA6",
     first: "Efua",
     last: "Owusu",
@@ -429,6 +431,7 @@ export const HOSTED_USERS: HostedUser[] = [
     schoolId: "TCH-001",
     libraryId: "LIB-2026-0003",
     email: "teacher@tema.edu.gh",
+    username: "teacher",
     hash: "$2a$10$dPb3wp937pSCnzfwo1nnMOLvyYLiEGgyXhoqeWWJaaxCSMd2hfIK2",
     first: "Daniel",
     last: "Appiah",
@@ -449,6 +452,7 @@ export const HOSTED_USERS: HostedUser[] = [
     schoolId: "TSS-2024-001",
     libraryId: "LIB-2026-0004",
     email: "student@tema.edu.gh",
+    username: "student",
     hash: "$2a$10$lFIAevo3EI8zuaAGXWN5dOBwHoPJ9hdXrwC3HZymuoR/KvM5zXCzu",
     first: "Ama",
     last: "Boateng",
@@ -469,6 +473,7 @@ export const HOSTED_USERS: HostedUser[] = [
     schoolId: "LIB-2026-0059",
     libraryId: "LIB-2026-0059",
     email: "kweirexmond@gmail.com",
+    username: "kweirexmond",
     hash: "$2a$10$AnTsxkXB2CFu388CESSgSeX8L4DF8hEM1h3kZPA3Qax9RHPYEq05G",
     first: "Rexmond",
     last: "Kwei",
@@ -552,11 +557,11 @@ export async function ensureHostedSeed(): Promise<boolean> {
     for (const row of HOSTED_USERS) {
       await run(
         `INSERT OR IGNORE INTO users
-           (id, school_id, library_id, email, password_hash, first_name, last_name, role, status,
+           (id, school_id, library_id, email, username, password_hash, first_name, last_name, role, status,
             class_name, programme, department, phone, gender, house, avatar_hue,
             token_version, last_login, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)`,
-        [row.id, row.schoolId, row.libraryId, row.email, row.hash, row.first, row.last, row.role,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)`,
+        [row.id, row.schoolId, row.libraryId, row.email, row.username, row.hash, row.first, row.last, row.role,
           row.status, row.className, row.programme, row.department, row.phone, row.gender, row.house,
           row.hue, row.createdAt, row.updatedAt]
       );

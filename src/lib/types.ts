@@ -4,6 +4,7 @@ export type AccountStatus = 'pending' | 'active' | 'suspended' | 'inactive' | 'g
 export interface User {
   id: number;
   libraryId: string;
+  username: string;
   email: string;
   firstName: string;
   lastName: string;

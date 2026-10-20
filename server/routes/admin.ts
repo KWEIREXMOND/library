@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
-import { all, get, nextLibraryId, nowIso, run, scalar } from '../db.js';
+import { all, get, nextLibraryId, nowIso, run, scalar, uniqueUsername } from '../db.js';
 import { hashPassword, requireAdmin } from '../auth.js';
 import {
   asyncH, audit, badRequest, cleanSearch, conflict, notFound, notifyMany, paginated, pagination, parse, publicUser,
 } from '../http.js';
+import { normaliseUsername, usernameIssue } from '../lib/username.js';
 
 const router = Router();
 
@@ -26,6 +27,7 @@ const PEOPLE_CTE = `
            CAST(u.id AS TEXT) AS key,
            u.id AS user_id,
            u.library_id AS library_id,
+           u.username AS username,
            u.first_name || ' ' || u.last_name AS name,
            u.email AS email,
            u.role AS role,
@@ -42,6 +44,7 @@ const PEOPLE_CTE = `
            LOWER(v.full_name) AS key,
            NULL AS user_id,
            NULL AS library_id,
+           NULL AS username,
            MAX(v.full_name) AS name,
            MAX(v.email) AS email,
            NULL AS role,
@@ -65,15 +68,15 @@ function peopleFilter(kind: string, query: string) {
   const where = ["(? = 'all' OR kind = ?)"];
   const params: (string | number)[] = [kind, kind];
   if (query) {
-    where.push(`(LOWER(name) LIKE ? OR LOWER(COALESCE(email, '')) LIKE ? OR LOWER(COALESCE(library_id, '')) LIKE ? OR LOWER(COALESCE(class_name, '')) LIKE ?)`);
-    params.push(query, query, query, query);
+    where.push(`(LOWER(name) LIKE ? OR LOWER(COALESCE(email, '')) LIKE ? OR LOWER(COALESCE(library_id, '')) LIKE ? OR LOWER(COALESCE(username, '')) LIKE ? OR LOWER(COALESCE(class_name, '')) LIKE ?)`);
+    params.push(query, query, query, query, query);
   }
   return { where: where.join(' AND '), params };
 }
 
 type PersonRow = {
   kind: PersonKind; key: string; user_id: number | null; library_id: string | null;
-  name: string; email: string | null; role: string | null; status: string | null;
+  username: string | null; name: string; email: string | null; role: string | null; status: string | null;
   class_name: string | null; house: string | null; joined_at: string | null;
   last_login: string | null; visits: number; last_visit: string | null;
 };
@@ -83,6 +86,7 @@ const mapPerson = (row: PersonRow) => ({
   key: row.key,
   userId: row.user_id,
   libraryId: row.library_id,
+  username: row.username,
   name: row.name,
   email: row.email,
   role: row.role,
@@ -225,6 +229,7 @@ const staffSchema = z.object({
   email: z.string().trim().email('Enter a valid email address.').max(160),
   phone: z.string().trim().max(30).optional().nullable(),
   role: z.enum(['admin', 'librarian']),
+  username: z.string().trim().max(40).optional(),
   password: z.string().min(8, 'Use at least 8 characters.')
     .regex(/[A-Za-z]/, 'Include a letter.')
     .regex(/[0-9]/, 'Include a number.')
@@ -245,15 +250,27 @@ router.post('/people/staff', requireAdmin, asyncH(async (req, res) => {
   const clash = await get<any>('SELECT id FROM users WHERE LOWER(email) = ?', [email]);
   if (clash) throw conflict('An account with that email address already exists.');
 
+  // Staff get a handle too, so they can sign in without a library ID to hand.
+  let username: string;
+  if (data.username) {
+    username = normaliseUsername(data.username);
+    const issue = usernameIssue(username);
+    if (issue) throw badRequest(issue, { username: issue });
+    const taken = await get<any>('SELECT id FROM users WHERE username = ?', [username]);
+    if (taken) throw conflict('That username is already taken. Try another one.', { username: 'That username is taken.' });
+  } else {
+    username = await uniqueUsername(`${data.firstName}.${data.lastName}`);
+  }
+
   const password = data.password ?? generatePassword();
   const libraryId = await nextLibraryId();
   const stamp = nowIso();
   const department = data.role === 'admin' ? 'Administration' : 'Library';
   const result = await run(
-    `INSERT INTO users (school_id, library_id, email, password_hash, first_name, last_name, role, status,
+    `INSERT INTO users (school_id, library_id, username, email, password_hash, first_name, last_name, role, status,
        department, phone, avatar_hue, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
-    [libraryId, libraryId, email, hashPassword(password), data.firstName, data.lastName, data.role,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
+    [libraryId, libraryId, username, email, hashPassword(password), data.firstName, data.lastName, data.role,
       department, data.phone ?? null, crypto.randomInt(360), stamp, stamp]
   );
   await audit({
@@ -261,12 +278,13 @@ router.post('/people/staff', requireAdmin, asyncH(async (req, res) => {
     action: 'user.create',
     entityType: 'user',
     entityId: result.lastInsertRowid,
-    summary: `Created ${data.role === 'admin' ? 'an administrator' : 'a librarian'} account for ${data.firstName} ${data.lastName} (${libraryId})`,
+    summary: `Created ${data.role === 'admin' ? 'an administrator' : 'a librarian'} account for ${data.firstName} ${data.lastName} (${libraryId}, username ${username})`,
   });
   const row = await get<any>('SELECT * FROM users WHERE id = ?', [result.lastInsertRowid]);
   res.status(201).json({
     user: publicUser(row),
     libraryId,
+    username,
     // The generated password is shown once; a supplied one is already known.
     password: data.password ? null : password,
     generated: !data.password,
@@ -303,10 +321,10 @@ router.get('/people/export.csv', requireAdmin, asyncH(async (req, res) => {
   )).map(mapPerson);
 
   const quote = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-  const header = ['Type', 'Library ID', 'Name', 'Email', 'Role', 'Status', 'Class', 'House', 'Visits', 'Last visit', 'Joined'];
+  const header = ['Type', 'Library ID', 'Username', 'Name', 'Email', 'Role', 'Status', 'Class', 'House', 'Visits', 'Last visit', 'Joined'];
   const lines = rows.map((row) => [
     row.kind === 'member' ? 'Member' : 'Walk-in',
-    row.libraryId ?? '', row.name, row.email ?? '', row.role ?? '', row.status ?? '',
+    row.libraryId ?? '', row.username ?? '', row.name, row.email ?? '', row.role ?? '', row.status ?? '',
     row.className ?? '', row.house ?? '', row.visits, row.lastVisit ?? '', row.joinedAt ?? '',
   ].map(quote).join(','));
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');

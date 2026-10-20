@@ -1,13 +1,14 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
-import { get, nextLibraryId, nowIso, run } from '../db.js';
+import { get, nextLibraryId, nowIso, run, uniqueUsername } from '../db.js';
 import {
   checkLoginRate, clearLoginAttempts, clearSessionCookie, hashPassword, issueSession,
   publicUser, recordFailedLogin, requireAuth, revokeSession, verifyPassword,
 } from '../auth.js';
 import { asyncH, audit, badRequest, clientIp, conflict, parse, unauthorized } from '../http.js';
 import { getSettings } from '../settings.js';
+import { normaliseUsername, usernameIssue } from '../lib/username.js';
 
 const router = Router();
 
@@ -21,9 +22,10 @@ router.post('/login', asyncH(async (req, res) => {
   const data = parse(loginSchema, req.body);
   const rateKey = checkLoginRate(req, data.identifier);
   const identifier = data.identifier.trim();
+  // Three ways in: the email address, the library ID, or the handle they chose.
   const user = await get<any>(
-    'SELECT * FROM users WHERE LOWER(email) = LOWER(?) OR UPPER(library_id) = UPPER(?)',
-    [identifier, identifier]
+    'SELECT * FROM users WHERE LOWER(email) = LOWER(?) OR UPPER(library_id) = UPPER(?) OR username = ?',
+    [identifier, identifier, normaliseUsername(identifier)]
   );
   if (!user || !verifyPassword(data.password, user.password_hash)) {
     recordFailedLogin(rateKey);
@@ -82,10 +84,13 @@ router.post('/register', asyncH(async (req, res) => {
   if (existing) throw conflict('An account with that email already exists. Try signing in instead.');
   const stamp = nowIso();
   const libraryId = await nextLibraryId();
+  // Everyone gets a handle as well, taken from the address they registered with;
+  // they can change it later from their account page.
+  const username = await uniqueUsername(data.email);
   const result = await run(
-    `INSERT INTO users (school_id, library_id, email, password_hash, first_name, last_name, role, status, class_name, programme, avatar_hue, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'student', 'active', ?, ?, ?, ?, ?)`,
-    [libraryId, libraryId, data.email.toLowerCase(), hashPassword(data.password), data.firstName, data.lastName,
+    `INSERT INTO users (school_id, library_id, username, email, password_hash, first_name, last_name, role, status, class_name, programme, avatar_hue, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'student', 'active', ?, ?, ?, ?, ?)`,
+    [libraryId, libraryId, username, data.email.toLowerCase(), hashPassword(data.password), data.firstName, data.lastName,
       data.className ?? null, data.programme ?? null, Math.floor(Math.random() * 360), stamp, stamp]
   );
   await audit({ userId: result.lastInsertRowid, action: 'auth.register', entityType: 'user', entityId: result.lastInsertRowid, summary: `Registered reader ${data.firstName} ${data.lastName} (${libraryId})`, ip: clientIp(req) });
@@ -96,7 +101,8 @@ router.post('/register', asyncH(async (req, res) => {
     token,
     settings: getSettings(),
     libraryId,
-    message: `Your library ID is ${libraryId}. Keep it safe — you will use it to sign in and at the kiosk.`,
+    username,
+    message: `Your library ID is ${libraryId} and your username is ${username}. Keep both safe — you will use them to sign in, and your library ID at the kiosk.`,
   });
 }));
 
@@ -115,8 +121,8 @@ router.post('/reset-password', asyncH(async (req, res) => {
   const data = parse(resetSchema, req.body);
   const rateKey = checkLoginRate(req, `reset:${data.identifier.toLowerCase()}`);
   const user = await get<any>(
-    'SELECT * FROM users WHERE LOWER(email) = LOWER(?) OR UPPER(library_id) = UPPER(?)',
-    [data.identifier, data.identifier]
+    'SELECT * FROM users WHERE LOWER(email) = LOWER(?) OR UPPER(library_id) = UPPER(?) OR username = ?',
+    [data.identifier, data.identifier, normaliseUsername(data.identifier)]
   );
   const matches = Boolean(user) && String(user.email ?? '').toLowerCase() === data.email.trim().toLowerCase();
   if (!matches) {
@@ -152,13 +158,26 @@ const profileSchema = z.object({
   lastName: z.string().trim().min(2, 'Enter your surname.'),
   phone: z.string().trim().max(30).optional().nullable(),
   email: z.string().trim().email('Enter a valid email address.'),
+  username: z.string().trim().max(40).optional(),
 });
 router.patch('/profile', requireAuth, asyncH(async (req, res) => {
   const data = parse(profileSchema, req.body);
   const clash = await get<any>('SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND id <> ?', [data.email, req.user!.id]);
   if (clash) throw conflict('That email address is already used by another account.');
-  await run('UPDATE users SET first_name = ?, last_name = ?, phone = ?, email = ?, updated_at = ? WHERE id = ?',
-    [data.firstName, data.lastName, data.phone ?? null, data.email.toLowerCase(), nowIso(), req.user!.id]);
+
+  const current = await get<any>('SELECT username FROM users WHERE id = ?', [req.user!.id]);
+  const username = data.username === undefined || data.username === ''
+    ? current?.username ?? await uniqueUsername(data.email, req.user!.id)
+    : normaliseUsername(data.username);
+  if (data.username !== undefined && data.username !== '') {
+    const issue = usernameIssue(username);
+    if (issue) throw badRequest(issue, { username: issue });
+    const taken = await get<any>('SELECT id FROM users WHERE username = ? AND id <> ?', [username, req.user!.id]);
+    if (taken) throw conflict('That username is already taken. Try another one.', { username: 'That username is taken.' });
+  }
+
+  await run('UPDATE users SET first_name = ?, last_name = ?, phone = ?, email = ?, username = ?, updated_at = ? WHERE id = ?',
+    [data.firstName, data.lastName, data.phone ?? null, data.email.toLowerCase(), username, nowIso(), req.user!.id]);
   await audit({ userId: req.user!.id, action: 'profile.update', entityType: 'user', entityId: req.user!.id, summary: 'Updated own profile' });
   res.json({ user: publicUser(await get<any>('SELECT * FROM users WHERE id = ?', [req.user!.id])) });
 }));

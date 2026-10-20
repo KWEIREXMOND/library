@@ -9,6 +9,6 @@ export default defineConfig({
     environment: 'jsdom',
     environmentOptions: { jsdom: { url: 'http://localhost:5173/' } },
     globals: true,
-    include: ['src/**/*.test.{ts,tsx}'],
+    include: ['src/**/*.test.{ts,tsx}', 'server/**/*.test.ts'],
   },
 });

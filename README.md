@@ -215,17 +215,21 @@ returns the user before signing out, `null` afterwards, and the old bearer token
 
 ## Demo accounts
 
-Every account signs in with its **library ID** or email address.
+Every account signs in with its **username**, **library ID** or **email address** — any one of the
+three works in the same field.
 
-| Role | Library ID | Email | Password |
-| --- | --- | --- | --- |
-| Administrator | `LIB-2026-0001` | `admin@tema.edu.gh` | `Admin@123` |
-| Librarian | `LIB-2026-0002` | `librarian@tema.edu.gh` | `Library@123` |
-| Teacher | `LIB-2026-0003` | `teacher@tema.edu.gh` | `Teacher@123` |
-| Student | `LIB-2026-0004` | `student@tema.edu.gh` | `Student@123` |
+| Role | Username | Library ID | Email | Password |
+| --- | --- | --- | --- | --- |
+| Administrator | `admin` | `LIB-2026-0001` | `admin@tema.edu.gh` | `Admin@123` |
+| Librarian | `librarian` | `LIB-2026-0002` | `librarian@tema.edu.gh` | `Library@123` |
+| Teacher | `teacher` | `LIB-2026-0003` | `teacher@tema.edu.gh` | `Teacher@123` |
+| Student | `student` | `LIB-2026-0004` | `student@tema.edu.gh` | `Student@123` |
 
-A fresh seed creates exactly these four accounts — one demo login per role. The full credential list
-lives in [`data/logins.md`](data/logins.md).
+A fresh seed creates exactly these four accounts — one demo login per role. Accounts that predate
+usernames get one from their email address the first time the server starts, so `admin@tema.edu.gh`
+becomes `admin`. Readers can change their username from **Account settings**; library staff can create
+new staff accounts from **People → Add staff account**, where the username is issued alongside the
+library ID.
 
 ## Starting from a clean library
 

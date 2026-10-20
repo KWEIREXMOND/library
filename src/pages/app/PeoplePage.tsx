@@ -91,7 +91,7 @@ export function PeoplePage() {
     role: 'librarian' as 'admin' | 'librarian', password: randomPassword(),
   });
   const [staffCreated, setStaffCreated] = useState<{
-    name: string; libraryId: string; email: string; role: string; password: string;
+    name: string; libraryId: string; username: string; email: string; role: string; password: string;
   } | null>(null);
 
   const { user } = useAuth();
@@ -159,7 +159,7 @@ export function PeoplePage() {
           : null;
 
   const createStaff = useMutation({
-    mutationFn: () => api<{ libraryId: string; password: string | null }>('/people/staff', {
+    mutationFn: () => api<{ libraryId: string; username: string; password: string | null }>('/people/staff', {
       method: 'POST',
       body: { ...staffForm, phone: staffForm.phone.trim() || null },
     }),
@@ -167,6 +167,7 @@ export function PeoplePage() {
       setStaffCreated({
         name: `${staffForm.firstName.trim()} ${staffForm.lastName.trim()}`.trim(),
         libraryId: result.libraryId,
+        username: result.username,
         email: staffForm.email.trim().toLowerCase(),
         role: staffForm.role,
         password: result.password ?? staffForm.password,
@@ -618,13 +619,15 @@ export function PeoplePage() {
               <p className="mt-1 text-[12px] text-forest-900/70">
                 {staffCreated.email} · {staffCreated.role === 'admin' ? 'Administrator' : 'Librarian'}
               </p>
+              <p className="mt-3 text-[10.5px] font-bold uppercase tracking-[0.13em] text-forest-900/60">Username</p>
+              <code className="mt-1 block select-all text-[15px] font-semibold tracking-wide text-forest-900">{staffCreated.username}</code>
             </div>
             <div className="flex items-center justify-between gap-2 rounded-xl border border-ink/15 bg-parchment-light px-3 py-3">
               <code className="select-all break-all text-[15px] font-semibold tracking-wide text-ink">{staffCreated.password}</code>
               <Button size="sm" variant="secondary" onClick={copyStaffPassword}>Copy</Button>
             </div>
             <p className="text-[12px] leading-relaxed text-ink-mute">
-              {staffCreated.name} signs in at <strong>/login</strong> with the library ID or email and this password, then changes it in Account settings.
+              {staffCreated.name} signs in at <strong>/login</strong> with the username, library ID or email and this password, then changes it in Account settings.
             </p>
           </div>
         ) : (
@@ -644,9 +647,9 @@ export function PeoplePage() {
               />
             </div>
             <Input
-              label="Email (their username)"
+              label="Email address"
               type="email"
-              hint="They can also sign in with the library ID issued below."
+              hint="A username is made from their name automatically; they can change it later."
               value={staffForm.email}
               onChange={(event) => setStaffForm({ ...staffForm, email: event.target.value })}
               autoComplete="off"

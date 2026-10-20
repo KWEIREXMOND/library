@@ -351,6 +351,7 @@ export function publicUser(row: any) {
   return {
     id: row.id,
     libraryId: row.library_id ?? row.school_id,
+    username: row.username ?? '',
     email: row.email,
     firstName: row.first_name,
     lastName: row.last_name,

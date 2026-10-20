@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createClient, type Client, type ResultSet } from '@libsql/client';
+import { usernameBase, usernameCandidate } from './lib/username.js';
 
 /**
  * The library runs on libSQL: a plain SQLite file in development and a hosted
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   school_id TEXT UNIQUE NOT NULL,
   email TEXT UNIQUE NOT NULL,
+  username TEXT,
   password_hash TEXT NOT NULL,
   first_name TEXT NOT NULL,
   last_name TEXT NOT NULL,
@@ -580,6 +582,41 @@ export async function ensureLibraryIds(): Promise<number> {
 }
 
 /**
+ * Pick a handle no one else holds. The base comes from an email address (or a
+ * name) and clashes gain a number: kofi, kofi2, kofi3… A withdrawn account still
+ * holds its handle, because people may come back.
+ */
+export async function uniqueUsername(seed: string, excludeId?: number): Promise<string> {
+  const base = usernameBase(seed);
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const candidate = usernameCandidate(base, attempt);
+    const clash = await get<{ id: number }>(
+      'SELECT id FROM users WHERE username = ? AND id <> ?',
+      [candidate, excludeId ?? 0]
+    );
+    if (!clash) return candidate;
+  }
+  return `${base.slice(0, 12)}.${Date.now().toString(36).slice(-6)}`;
+}
+
+/**
+ * Give every account a handle, including the ones that existed before handles
+ * did. Safe to call repeatedly; the demo accounts get `admin`, `librarian` and
+ * so on because their email addresses already say who they are.
+ */
+export async function ensureUsernames(): Promise<number> {
+  const missing = await all<{ id: number; email: string | null; first_name: string | null; last_name: string | null }>(
+    "SELECT id, email, first_name, last_name FROM users WHERE username IS NULL OR username = '' ORDER BY id"
+  );
+  if (!missing.length) return 0;
+  for (const user of missing) {
+    const seed = user.email || `${user.first_name ?? ''}.${user.last_name ?? ''}`;
+    await run('UPDATE users SET username = ? WHERE id = ?', [await uniqueUsername(seed, user.id), user.id]);
+  }
+  return missing.length;
+}
+
+/**
  * Historical front-desk rows kept the old admission number. Rewrite them to the
  * member's library number so the register speaks one language.
  */
@@ -614,6 +651,8 @@ async function initialise() {
   await ensureColumn('users', 'house', 'TEXT');
   // Library membership number, issued instead of a school admission number.
   await ensureColumn('users', 'library_id', 'TEXT');
+  // Optional handle that can be used instead of the email or library ID.
+  await ensureColumn('users', 'username', 'TEXT');
   // Online books reuse the digital-resources table.
   await ensureColumn('resources', 'cover_url', 'TEXT');
   await ensureColumn('resources', 'category', 'TEXT');
@@ -621,6 +660,9 @@ async function initialise() {
   await execRaw('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_library_id ON users(library_id)');
 
   await ensureLibraryIds();
+  await ensureUsernames();
+  // Every account ends up with one, so the database enforces it too.
+  await execRaw('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)');
   await refreshVisitLibraryIds();
   const count = await scalar<number>('SELECT COUNT(*) FROM users');
   return { seeded: count > 0, users: count };

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { all, execRaw, get, initDb, nextLibraryId, nowIso, run, scalar, tx, RESOURCE_DIR, BACKUP_DIR } from '../db.js';
+import { all, execRaw, get, initDb, nextLibraryId, nowIso, run, scalar, tx, uniqueUsername, RESOURCE_DIR, BACKUP_DIR } from '../db.js';
 import { hashPassword } from '../auth.js';
 import { clearSettingsCache, DEFAULT_SETTINGS } from '../settings.js';
 import { makePdf, wasscePaper } from './pdf.js';
@@ -213,11 +213,13 @@ async function addUser(opts: {
   const stamp = nowIso();
   // Demo accounts are library members too: issue a library number at creation.
   const libraryId = await nextLibraryId(new Date(stamp));
+  // The email address also seeds the username (admin@… becomes `admin`).
+  const username = await uniqueUsername(opts.email);
   const r = await run(
-    `INSERT INTO users (school_id, library_id, email, password_hash, first_name, last_name, role, status, class_name,
+    `INSERT INTO users (school_id, library_id, username, email, password_hash, first_name, last_name, role, status, class_name,
       programme, department, phone, gender, house, avatar_hue, last_login, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [opts.schoolId, libraryId, opts.email.toLowerCase(), opts.passwordHash, opts.firstName, opts.lastName, opts.role,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [opts.schoolId, libraryId, username, opts.email.toLowerCase(), opts.passwordHash, opts.firstName, opts.lastName, opts.role,
       opts.status ?? 'active', opts.className ?? null, opts.programme ?? null, opts.department ?? null,
       opts.phone ?? `+233 24 ${between(100, 999)} ${between(1000, 9999)}`, opts.gender ?? null,
       opts.house ?? null, between(0, 359), isoDays(between(0, 25)), stamp, stamp]

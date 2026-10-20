@@ -15,13 +15,24 @@ const ROLE_LABEL: Record<string, string> = {
 };
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** Mirrors the server's rules so the form can explain a problem before saving. */
+function usernameProblem(value: string): string | null {
+  const username = value.trim().toLowerCase();
+  if (!username) return 'Choose a username.';
+  if (username.length < 3) return 'Use at least 3 characters.';
+  if (username.length > 24) return 'Use at most 24 characters.';
+  if (!/^[a-z0-9._-]+$/.test(username)) return 'Use only letters, numbers, dots, hyphens and underscores.';
+  if (!/^[a-z]/.test(username)) return 'Start the username with a letter.';
+  if (/^lib-\d{4}-\d{4}$/.test(username)) return 'That looks like a library ID — choose another username.';
+  return null;
+}
 
 /**
  * The signed-in person's own account.
  *
- * Everyone — students included — can correct their name, change the email they
- * use as a username, and set a new password. The library ID is issued by the
- * school, so it is shown but not editable here.
+ * Everyone — students included — can correct their name, choose the username
+ * and email they sign in with, and set a new password. The library ID is issued
+ * by the school, so it is shown but not editable here.
  */
 export function AccountPage() {
   useDocumentTitle('Account settings');
@@ -31,6 +42,7 @@ export function AccountPage() {
   const [profile, setProfile] = useState({
     firstName: user?.firstName ?? '',
     lastName: user?.lastName ?? '',
+    username: user?.username ?? '',
     email: user?.email ?? '',
     phone: user?.phone ?? '',
   });
@@ -43,6 +55,7 @@ export function AccountPage() {
     setProfile({
       firstName: user.firstName,
       lastName: user.lastName,
+      username: user.username ?? '',
       email: user.email,
       phone: user.phone ?? '',
     });
@@ -56,22 +69,24 @@ export function AccountPage() {
   const firstName = profile.firstName.trim();
   const lastName = profile.lastName.trim();
   const email = profile.email.trim();
+  const username = profile.username.trim().toLowerCase();
+  const usernameIssue = usernameProblem(username);
   const profileIssue = firstName.length < 2 ? 'Enter your first name.'
     : lastName.length < 2 ? 'Enter your surname.'
-      : !EMAIL.test(email) ? 'Enter a valid email address.'
-        : null;
+      : usernameIssue ?? (!EMAIL.test(email) ? 'Enter a valid email address.' : null);
   const profileDirty = firstName !== user.firstName || lastName !== user.lastName
+    || username !== (user.username ?? '').toLowerCase()
     || email.toLowerCase() !== user.email.toLowerCase() || (profile.phone.trim() || null) !== (user.phone ?? null);
 
   const saveProfile = useMutation({
     mutationFn: () => api('/auth/profile', {
       method: 'PATCH',
-      body: { firstName, lastName, email, phone: profile.phone.trim() || null },
+      body: { firstName, lastName, username, email, phone: profile.phone.trim() || null },
     }),
     onSuccess: async () => {
       setProfileErrors({});
       await refresh();
-      toast.push({ tone: 'success', title: 'Account updated', description: 'Your details are saved. Use the new username the next time you sign in.' });
+      toast.push({ tone: 'success', title: 'Account updated', description: 'Your details are saved. Use your new username — or your email or library ID — the next time you sign in.' });
     },
     onError: (error) => {
       if (error instanceof ApiError) setProfileErrors(error.fieldErrors);
@@ -124,17 +139,27 @@ export function AccountPage() {
       <PageHeader
         eyebrow="Your account"
         title="Account settings"
-        description="Change your name, the email address you sign in with, and your password. These details are yours — the library keeps the ID."
+        description="Choose the username you sign in with, change your name and email, and set a new password. These details are yours — the library keeps the ID."
       />
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
         <section className="rounded-2xl border border-ink/10 bg-white p-5 shadow-sm sm:p-6">
           <h2 className="text-[17px] font-semibold text-ink">Your details</h2>
           <p className="mt-1 text-[12.5px] text-ink-mute">
-            Your email doubles as your username: sign in with it or with your library ID.
+            Sign in with any of these: your username, your email address or your library ID.
           </p>
 
           <form className="mt-5 space-y-4" onSubmit={submitProfile} noValidate>
+            <Input
+              label="Username"
+              name="username"
+              autoComplete="username"
+              placeholder="ama.boateng"
+              hint="Letters, numbers, dots, hyphens and underscores. You can change it whenever you like."
+              value={profile.username}
+              onChange={(event) => setProfile({ ...profile, username: event.target.value })}
+              error={profileErrors.username}
+            />
             <div className="grid gap-4 sm:grid-cols-2">
               <Input
                 label="First name"
@@ -154,11 +179,11 @@ export function AccountPage() {
               />
             </div>
             <Input
-              label="Username (email)"
+              label="Email address"
               name="email"
               type="email"
               autoComplete="email"
-              hint="You will use this address — or your library ID — the next time you sign in."
+              hint="We use this to recover your account. Only library staff can see it."
               value={profile.email}
               onChange={(event) => setProfile({ ...profile, email: event.target.value })}
               error={profileErrors.email}
@@ -193,6 +218,10 @@ export function AccountPage() {
               </div>
             </div>
             <dl className="mt-4 space-y-3 text-[12.5px]">
+              <div>
+                <dt className="text-[10.5px] font-bold uppercase tracking-[0.13em] text-ink/40">Username</dt>
+                <dd className="mt-1 font-mono text-[15px] font-semibold text-ink">{user.username || '—'}</dd>
+              </div>
               <div>
                 <dt className="text-[10.5px] font-bold uppercase tracking-[0.13em] text-ink/40">Library ID</dt>
                 <dd className="mt-1 font-mono text-[15px] font-semibold text-ink">{user.libraryId}</dd>

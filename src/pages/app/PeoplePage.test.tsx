@@ -142,7 +142,7 @@ describe('PeoplePage', () => {
   it('creates a librarian account and shows the sign-in details once', async () => {
     const user = userEvent.setup();
     apiMock.mockImplementation(async (path: string) => {
-      if (path === '/people/staff') return { user: {}, libraryId: 'LIB-2026-0060', password: null, generated: false };
+      if (path === '/people/staff') return { user: {}, libraryId: 'LIB-2026-0060', username: 'yaw.owusu', password: null, generated: false };
       if (path.startsWith('/people/member/')) return detail;
       if (path.startsWith('/people?')) return payload;
       return {};
@@ -153,7 +153,7 @@ describe('PeoplePage', () => {
     await user.click(screen.getByRole('button', { name: /add staff account/i }));
     await user.type(screen.getByLabelText('First name'), 'Yaw');
     await user.type(screen.getByLabelText('Surname'), 'Owusu');
-    await user.type(screen.getByLabelText(/email \(their username\)/i), 'yaw.owusu@tema.edu.gh');
+    await user.type(screen.getByLabelText('Email address'), 'yaw.owusu@tema.edu.gh');
     await user.click(screen.getByRole('button', { name: /create account/i }));
 
     await waitFor(() => expect(apiMock).toHaveBeenCalledWith('/people/staff', expect.objectContaining({
@@ -167,6 +167,7 @@ describe('PeoplePage', () => {
     })));
 
     expect(await screen.findByText('LIB-2026-0060')).toBeTruthy();
+    expect(screen.getByText('yaw.owusu')).toBeTruthy();
     expect(screen.getByText(/Staff account ready/i)).toBeTruthy();
   });
 });

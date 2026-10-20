@@ -117,7 +117,7 @@ export function LoginPage() {
   });
 
   return (
-    <AuthFrame title="Welcome back." subtitle="Sign in with your library ID or email address to read books online.">
+    <AuthFrame title="Welcome back." subtitle="Sign in with your username, library ID or email address to read books online.">
       {mutation.isError && !Object.keys(errors).length ? (
         <Alert tone="danger" className="mb-4">{mutation.error instanceof ApiError ? mutation.error.message : 'Sign-in failed. Please try again.'}</Alert>
       ) : null}
@@ -127,7 +127,7 @@ export function LoginPage() {
           event.preventDefault();
           if (!form.identifier.trim() || !form.password) {
             setErrors({
-              ...(form.identifier.trim() ? {} : { identifier: 'Enter your library ID or email.' }),
+              ...(form.identifier.trim() ? {} : { identifier: 'Enter your username, library ID or email.' }),
               ...(form.password ? {} : { password: 'Enter your password.' }),
             });
             return;
@@ -135,11 +135,11 @@ export function LoginPage() {
           mutation.mutate();
         }}
       >
-        <Field label="Library ID or email" required>
+        <Field label="Username, library ID or email" required>
           <Input
             value={form.identifier}
             onChange={(event) => setForm({ ...form, identifier: event.target.value })}
-            placeholder="LIB-2026-0001"
+            placeholder="ama.boateng or LIB-2026-0001"
             icon={IdCard}
             autoComplete="username"
             invalid={Boolean(errors.identifier)}
@@ -185,7 +185,7 @@ export function RegisterPage() {
 
   const mutation = useMutation({
     mutationFn: async () => {
-      const result = await api<{ libraryId: string }>('/auth/register', {
+      const result = await api<{ libraryId: string; username?: string }>('/auth/register', {
         method: 'POST',
         body: {
           firstName: form.firstName.trim(),
@@ -205,7 +205,7 @@ export function RegisterPage() {
       }
       toast.push({
         title: 'Your library ID is ready',
-        description: `${result.libraryId} — keep it safe. Use it to sign in and read any book online.`,
+        description: `${result.libraryId}${result.username ? ` · username ${result.username}` : ''} — keep both safe. Use either one to sign in and read any book online.`,
         tone: 'success',
       });
       navigate('/books', { replace: true });
@@ -253,7 +253,7 @@ export function RegisterPage() {
       </form>
       <p className="mt-6 flex items-start gap-2 text-[12px] leading-relaxed text-ink-mute">
         <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-forest-600" />
-        You will see your library ID as soon as the account is created. Write it down — it is how you sign in and open any book on the shelves.
+        You will see your library ID and username as soon as the account is created. Write them down — either one signs you in, and your library ID opens books at the kiosk.
       </p>
       <p className="mt-4 text-[12.5px] text-ink-mute">
         Already have one? <Link to="/login" className="font-semibold text-forest-700 hover:underline">Sign in</Link>.
@@ -292,7 +292,7 @@ export function ResetPasswordPage() {
   }, [user, done, navigate]);
 
   return (
-    <AuthFrame title="Reset your password." subtitle="Confirm the library ID and email on your account, then choose a new password.">
+    <AuthFrame title="Reset your password." subtitle="Confirm the username (or library ID) and email on your account, then choose a new password.">
       {done ? (
         <div className="space-y-5">
           <Alert tone="success" title="Password changed">You can now sign in with your new password.</Alert>
@@ -306,14 +306,14 @@ export function ResetPasswordPage() {
             onSubmit={(event) => {
               event.preventDefault();
               setError(null);
-              if (!form.identifier.trim()) { setError('Enter your library ID or email address.'); return; }
+              if (!form.identifier.trim()) { setError('Enter your username, library ID or email address.'); return; }
               if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) { setError('Enter the email address on the account.'); return; }
               if (form.password.length < 8) { setError('Use a password of at least 8 characters.'); return; }
               if (form.password !== form.confirm) { setError('The two passwords do not match.'); return; }
               mutation.mutate();
             }}
           >
-            <Field label="Library ID or email" required>
+            <Field label="Username, library ID or email" required>
               <Input
                 value={form.identifier}
                 onChange={(event) => setForm({ ...form, identifier: event.target.value })}

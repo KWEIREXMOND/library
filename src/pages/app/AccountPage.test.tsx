@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 const user = vi.hoisted(() => ({
   id: 4,
   libraryId: 'LIB-2026-0004',
+  username: 'ama.boateng',
   email: 'student@tema.edu.gh',
   firstName: 'Ama',
   lastName: 'Boateng',
@@ -66,16 +67,20 @@ describe('AccountPage', () => {
     renderPage();
     expect(screen.getByDisplayValue('Ama')).toBeTruthy();
     expect(screen.getByDisplayValue('student@tema.edu.gh')).toBeTruthy();
+    expect(screen.getByDisplayValue('ama.boateng')).toBeTruthy();
     expect(screen.getByText('LIB-2026-0004')).toBeTruthy();
     expect(screen.getByText('Student')).toBeTruthy();
   });
 
-  it('saves an edited username (email) and name through the profile endpoint', async () => {
+  it('saves an edited username, email and name through the profile endpoint', async () => {
     const events = userEvent.setup();
-    apiMock.mockResolvedValueOnce({ user: { ...user, email: 'ama.boateng@tema.edu.gh' } });
+    apiMock.mockResolvedValueOnce({ user: { ...user, username: 'ama.b', email: 'ama.boateng@tema.edu.gh' } });
     renderPage();
 
-    const email = screen.getByLabelText(/username \(email\)/i);
+    const handle = screen.getByLabelText('Username');
+    await events.clear(handle);
+    await events.type(handle, 'Ama.B');
+    const email = screen.getByLabelText('Email address');
     await events.clear(email);
     await events.type(email, 'ama.boateng@tema.edu.gh');
     const first = screen.getByLabelText('First name');
@@ -88,11 +93,25 @@ describe('AccountPage', () => {
       method: 'PATCH',
       body: expect.objectContaining({
         firstName: 'Ama Serwaa',
+        username: 'ama.b',
         email: 'ama.boateng@tema.edu.gh',
         phone: null,
       }),
     })));
     await waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it('explains a username the sign-in screen would reject', async () => {
+    const events = userEvent.setup();
+    renderPage();
+
+    const handle = screen.getByLabelText('Username');
+    await events.clear(handle);
+    await events.type(handle, '1ama');
+
+    expect(await screen.findByText('Start the username with a letter.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /save changes/i })).toHaveProperty('disabled', true);
+    expect(apiMock).not.toHaveBeenCalled();
   });
 
   it('refuses a password form whose two new passwords differ', async () => {
