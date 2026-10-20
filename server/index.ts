@@ -21,7 +21,6 @@ import notificationRoutes from './routes/notifications.js';
 import settingsRoutes from './routes/settings.js';
 import mediaRoutes from './routes/media.js';
 import uploadRoutes from './routes/uploads.js';
-import smokeRoutes from './routes/smoke.js';
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
@@ -112,7 +111,6 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api', mediaRoutes);
 app.use('/api', uploadRoutes);
-if (process.env.SMOKE_KEY) app.use('/api', smokeRoutes(process.env.SMOKE_KEY));
 
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'That API endpoint does not exist.' });
