@@ -86,9 +86,12 @@ export const BOOLEAN_KEYS: (keyof Settings)[] = [
 
 let cache: Settings | null = null;
 
-export function getSettings(): Settings {
-  if (cache) return cache;
-  const rows = all<{ key: string; value: string }>('SELECT key, value FROM settings');
+/**
+ * Settings are read on almost every request (site name, currency, loan rules),
+ * so they are loaded once into memory at boot and refreshed on every update.
+ */
+export async function loadSettings(): Promise<Settings> {
+  const rows = await all<{ key: string; value: string }>('SELECT key, value FROM settings');
   const values: Record<string, unknown> = { ...DEFAULT_SETTINGS };
   for (const row of rows) {
     try {
@@ -101,7 +104,11 @@ export function getSettings(): Settings {
   return cache;
 }
 
-export function updateSettings(patch: Record<string, unknown>): Settings {
+export function getSettings(): Settings {
+  return cache ?? DEFAULT_SETTINGS;
+}
+
+export async function updateSettings(patch: Record<string, unknown>): Promise<Settings> {
   const current = getSettings();
   const allowed = Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[];
   const stamp = nowIso();
@@ -115,7 +122,7 @@ export function updateSettings(patch: Record<string, unknown>): Settings {
     }
     if (BOOLEAN_KEYS.includes(key)) value = value === true || value === 'true' || value === 1;
     if (typeof DEFAULT_SETTINGS[key] === 'string') value = String(value ?? '');
-    run(
+    await run(
       `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       [key, JSON.stringify(value), stamp]
@@ -130,12 +137,12 @@ export function clearSettingsCache() {
   cache = null;
 }
 
-export function currentAcademicPeriod() {
-  const year = get<{ id: number; name: string }>(
+export async function currentAcademicPeriod(): Promise<{ year: string | null; term: string | null; termStart: string | null; termEnd: string | null }> {
+  const year = await get<{ id: number; name: string }>(
     'SELECT id, name FROM academic_years WHERE is_current = 1 ORDER BY id DESC LIMIT 1'
   );
   const term = year
-    ? get<{ name: string; start_date: string; end_date: string }>(
+    ? await get<{ name: string; start_date: string; end_date: string }>(
         'SELECT name, start_date, end_date FROM terms WHERE academic_year_id = ? AND is_current = 1 LIMIT 1',
         [year.id]
       )

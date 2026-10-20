@@ -5,11 +5,11 @@ import compression from 'compression';
 import path from 'node:path';
 import fs from 'node:fs';
 import multer from 'multer';
-import { all, db, scalar, BRAND_DIR } from './db.js';
+import { all, db, initDb, scalar, BRAND_DIR } from './db.js';
 import { authenticate, pruneRevokedSessions } from './auth.js';
 import { HttpError } from './http.js';
 import { seed } from './seed/index.js';
-import { getSettings } from './settings.js';
+import { getSettings, loadSettings } from './settings.js';
 
 import authRoutes from './routes/auth.js';
 import bookRoutes from './routes/books.js';
@@ -76,11 +76,11 @@ app.use('/api', (req, res, next) => {
   res.status(403).json({ error: 'Cross-site request blocked.' });
 });
 
-app.get('/api/health', (_req, res) => {
+app.get('/api/health', async (_req, res) => {
   res.json({
     ok: true,
     time: new Date().toISOString(),
-    database: scalar<number>('SELECT COUNT(*) FROM users') > 0 ? 'ready' : 'empty',
+    database: await scalar<number>('SELECT COUNT(*) FROM users') > 0 ? 'ready' : 'empty',
     version: '1.0.0',
   });
 });
@@ -175,15 +175,20 @@ app.use((err: any, req: express.Request, res: express.Response, _next: express.N
   });
 });
 
-const userCount = scalar<number>('SELECT COUNT(*) FROM users');
+// The schema and the settings cache must exist before the first query.
+await initDb();
+await loadSettings();
+
+const userCount = await scalar<number>('SELECT COUNT(*) FROM users');
 const autoSeed = process.env.AUTO_SEED !== 'false';
 if (userCount === 0 && !autoSeed) {
   console.warn('[seed] The database is empty and AUTO_SEED=false — no accounts exist yet.');
 }
 if (userCount === 0 && autoSeed) {
   console.log('[seed] Empty database detected — creating the demo library…');
-  const result = seed();
+  const result = await seed();
   if (result.seeded) {
+    await loadSettings();
     console.log(`[seed] ${result.titles} titles, ${result.copies} copies, ${result.users} members, ${result.loans} loans, ${result.resources} books online.`);
     if (isProd) {
       console.warn('[seed] Demo accounts were created in production. Sign in and change their passwords.');
@@ -193,7 +198,7 @@ if (userCount === 0 && autoSeed) {
       console.log('[seed] Demo sign-ins: admin@tema.edu.gh / Admin@123 · librarian@tema.edu.gh / Library@123');
       console.log('[seed]               teacher@tema.edu.gh / Teacher@123 · student@tema.edu.gh / Student@123');
       if (!isProd) {
-        const demo = all<{ email: string; library_id: string }>(
+        const demo = await all<{ email: string; library_id: string }>(
           `SELECT email, library_id FROM users WHERE email IN ('admin@tema.edu.gh','librarian@tema.edu.gh','teacher@tema.edu.gh','student@tema.edu.gh') ORDER BY id`
         );
         for (const row of demo) console.log(`[seed]               library ID ${row.library_id} → ${row.email}`);
@@ -203,9 +208,9 @@ if (userCount === 0 && autoSeed) {
 }
 
 // Housekeeping: expiries and reminders. Runs at start and every 30 minutes.
-function housekeeping() {
+async function housekeeping() {
   try {
-    pruneRevokedSessions();
+    await pruneRevokedSessions();
   } catch (err) {
     console.error('[housekeeping]', err);
   }
@@ -213,23 +218,24 @@ function housekeeping() {
 housekeeping();
 setInterval(housekeeping, 30 * 60 * 1000).unref?.();
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Libra API listening on http://0.0.0.0:${PORT}${isProd ? ' (production)' : ''}`);
-});
-
-// Finish in-flight requests and checkpoint SQLite before the process exits, so
-// a deploy restart never leaves a stale -wal file behind.
-function shutdown(signal: string) {
-  console.log(`[shutdown] ${signal} received — closing the library server…`);
-  server.close(() => {
-    try { db.close(); } catch { /* already closed */ }
-    process.exit(0);
+// Vercel imports this module as a serverless function: it must not listen.
+if (!process.env.VERCEL) {
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Libra API listening on http://0.0.0.0:${PORT}${isProd ? ' (production)' : ''}`);
   });
-  setTimeout(() => process.exit(0), 8000).unref();
+
+  const shutdown = (signal: string) => {
+    console.log(`[shutdown] ${signal} received — closing the library server…`);
+    server.close(() => {
+      try { void db.close(); } catch { /* already closed */ }
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 8000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Exported for tests / tooling
 export { app };
-export const stats = () => all(`SELECT COUNT(*) AS users FROM users`);
+export const stats = async () => await all(`SELECT COUNT(*) AS users FROM users`);

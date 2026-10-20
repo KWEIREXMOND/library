@@ -62,9 +62,9 @@ router.get('/kiosk/summary', requireStaff, asyncH(async (_req, res) => {
     schoolShortName: settings.schoolShortName,
     motto: settings.motto,
     logoUrl: settings.logoUrl,
-    inside: get<any>('SELECT COUNT(*) AS n FROM library_visits WHERE signed_out_at IS NULL')?.n ?? 0,
-    visitsToday: get<any>('SELECT COUNT(*) AS n FROM library_visits WHERE date(signed_in_at) = date(?)', [today])?.n ?? 0,
-    books: get<any>("SELECT COUNT(*) AS n FROM resources WHERE kind = 'ebook' AND status = 'approved'")?.n ?? 0,
+    inside: (await get<any>('SELECT COUNT(*) AS n FROM library_visits WHERE signed_out_at IS NULL'))?.n ?? 0,
+    visitsToday: (await get<any>('SELECT COUNT(*) AS n FROM library_visits WHERE date(signed_in_at) = date(?)', [today]))?.n ?? 0,
+    books: (await get<any>("SELECT COUNT(*) AS n FROM resources WHERE kind = 'ebook' AND status = 'approved'"))?.n ?? 0,
     today,
   });
 }));
@@ -90,7 +90,7 @@ router.post('/kiosk/sign-in', requireStaff, asyncH(async (req, res) => {
     throw conflict('Too many sign-ins from this device. Please wait a moment before trying again.');
   }
   const data = parse(signInSchema, req.body);
-  const existing = get<any>(
+  const existing = await get<any>(
     `SELECT id, signed_in_at FROM library_visits
      WHERE signed_out_at IS NULL AND LOWER(full_name) = LOWER(?) ORDER BY id DESC LIMIT 1`,
     [data.fullName.trim()]
@@ -103,14 +103,14 @@ router.post('/kiosk/sign-in', requireStaff, asyncH(async (req, res) => {
   }
 
   // Match a name against the member list so the visit can link to their account.
-  const member = get<any>(
+  const member = await get<any>(
     `SELECT id, first_name, last_name, email, class_name, house FROM users
      WHERE status = 'active' AND LOWER(first_name || ' ' || last_name) = LOWER(?) LIMIT 1`,
     [data.fullName.trim()]
   );
 
   const stamp = nowIso();
-  const result = run(
+  const result = await run(
     `INSERT INTO library_visits (user_id, full_name, email, class_name, house, item_brought, book_taken,
        purpose, signed_in_by, signed_in_at, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -127,8 +127,8 @@ router.post('/kiosk/sign-in', requireStaff, asyncH(async (req, res) => {
       stamp, stamp, stamp,
     ]
   );
-  const row = get<any>('SELECT * FROM library_visits WHERE id = ?', [result.lastInsertRowid]);
-  res.status(201).json({ visit: mapKioskVisit(row), summary: visitSummary() });
+  const row = await get<any>('SELECT * FROM library_visits WHERE id = ?', [result.lastInsertRowid]);
+  res.status(201).json({ visit: mapKioskVisit(row), summary: await visitSummary() });
 }));
 
 /** Public landing data: school identity plus the shape of the library today. */
@@ -143,9 +143,9 @@ router.get('/public/summary', asyncH(async (_req, res) => {
     address: settings.address,
     email: settings.email,
     phone: settings.phone,
-    books: get<any>("SELECT COUNT(*) AS n FROM resources WHERE kind = 'ebook' AND status = 'approved'")?.n ?? 0,
-    inside: get<any>('SELECT COUNT(*) AS n FROM library_visits WHERE signed_out_at IS NULL')?.n ?? 0,
-    visitsToday: get<any>('SELECT COUNT(*) AS n FROM library_visits WHERE date(signed_in_at) = date(?)', [today])?.n ?? 0,
+    books: (await get<any>("SELECT COUNT(*) AS n FROM resources WHERE kind = 'ebook' AND status = 'approved'"))?.n ?? 0,
+    inside: (await get<any>('SELECT COUNT(*) AS n FROM library_visits WHERE signed_out_at IS NULL'))?.n ?? 0,
+    visitsToday: (await get<any>('SELECT COUNT(*) AS n FROM library_visits WHERE date(signed_in_at) = date(?)', [today]))?.n ?? 0,
   });
 }));
 
@@ -153,12 +153,12 @@ router.get('/public/summary', asyncH(async (_req, res) => {
  * Who is inside right now, for the staff kiosk and dashboard.
  */
 router.get('/kiosk/inside', requireStaff, asyncH(async (_req, res) => {
-  const rows = all<any>(
+  const rows = await all<any>(
     `SELECT id, full_name, class_name, house, purpose, book_taken, signed_in_at FROM library_visits
      WHERE signed_out_at IS NULL ORDER BY signed_in_at DESC LIMIT 12`
   );
   res.json({
-    count: get<any>('SELECT COUNT(*) AS n FROM library_visits WHERE signed_out_at IS NULL')?.n ?? 0,
+    count: (await get<any>('SELECT COUNT(*) AS n FROM library_visits WHERE signed_out_at IS NULL'))?.n ?? 0,
     recent: rows.map((row) => ({
       id: row.id,
       name: cleanSearch(row.full_name),
@@ -174,11 +174,11 @@ router.get('/kiosk/inside', requireStaff, asyncH(async (_req, res) => {
 
 /* ── Staff view of the sign-in register ───────────────────────────────── */
 
-function visitSummary() {
-  const inside = scalar<number>('SELECT COUNT(*) FROM library_visits WHERE signed_out_at IS NULL');
-  const visitsToday = scalar<number>("SELECT COUNT(*) FROM library_visits WHERE date(signed_in_at) = date('now')");
-  const walkInsToday = scalar<number>("SELECT COUNT(*) FROM library_visits WHERE date(signed_in_at) = date('now') AND user_id IS NULL");
-  const averageMinutes = scalar<number>(
+async function visitSummary() {
+  const inside = await scalar<number>('SELECT COUNT(*) FROM library_visits WHERE signed_out_at IS NULL');
+  const visitsToday = await scalar<number>("SELECT COUNT(*) FROM library_visits WHERE date(signed_in_at) = date('now')");
+  const walkInsToday = await scalar<number>("SELECT COUNT(*) FROM library_visits WHERE date(signed_in_at) = date('now') AND user_id IS NULL");
+  const averageMinutes = await scalar<number>(
     `SELECT COALESCE(AVG((julianday(signed_out_at) - julianday(signed_in_at)) * 1440), 0)
      FROM library_visits WHERE signed_out_at IS NOT NULL AND date(signed_in_at) = date('now')`
   );
@@ -202,14 +202,14 @@ router.get('/visits', requireStaff, asyncH(async (req, res) => {
     params.push(q, q, q, q);
   }
   const filter = `WHERE ${where.join(' AND ')}`;
-  const rows = all<any>(
+  const rows = await all<any>(
     `SELECT * FROM library_visits ${filter} ORDER BY signed_out_at IS NOT NULL, signed_in_at DESC LIMIT ? OFFSET ?`,
     [...params, p.pageSize, p.offset]
   );
-  const total = scalar<number>(`SELECT COUNT(*) FROM library_visits ${filter}`, params);
+  const total = await scalar<number>(`SELECT COUNT(*) FROM library_visits ${filter}`, params);
   res.json({
     ...paginated(rows.map((row) => ({ ...mapKioskVisit(row), matchedMember: row.user_id !== null })), total, p),
-    summary: visitSummary(),
+    summary: await visitSummary(),
   });
 }));
 
@@ -220,7 +220,7 @@ const signOutSchema = z.object({
 router.post('/visits/:id/sign-out', requireStaff, asyncH(async (req, res) => {
   const id = Number(req.params.id);
   const data = parse(signOutSchema, req.body ?? {});
-  const row = get<any>('SELECT * FROM library_visits WHERE id = ?', [id]);
+  const row = await get<any>('SELECT * FROM library_visits WHERE id = ?', [id]);
   if (!row) throw notFound('That visit could not be found.');
   if (!row.signed_out_at) {
     const stamp = nowIso();
@@ -228,18 +228,18 @@ router.post('/visits/:id/sign-out', requireStaff, asyncH(async (req, res) => {
     // empty list clears the field; omitting it leaves whatever was recorded.
     if (data.books !== undefined) {
       const books = Array.from(new Set(data.books.map((book) => book.trim()).filter(Boolean)));
-      run('UPDATE library_visits SET signed_out_at = ?, book_taken = ?, updated_at = ? WHERE id = ?',
+      await run('UPDATE library_visits SET signed_out_at = ?, book_taken = ?, updated_at = ? WHERE id = ?',
         [stamp, books.length ? books.join(', ') : null, stamp, id]);
     } else {
-      run('UPDATE library_visits SET signed_out_at = ?, updated_at = ? WHERE id = ?', [stamp, stamp, id]);
+      await run('UPDATE library_visits SET signed_out_at = ?, updated_at = ? WHERE id = ?', [stamp, stamp, id]);
     }
   }
-  res.json({ visit: mapKioskVisit(get<any>('SELECT * FROM library_visits WHERE id = ?', [id])), summary: visitSummary() });
+  res.json({ visit: mapKioskVisit(await get<any>('SELECT * FROM library_visits WHERE id = ?', [id])), summary: await visitSummary() });
 }));
 
 router.get('/visits/export', requireStaff, asyncH(async (req, res) => {
   const date = String(req.query.date ?? nowIso().slice(0, 10));
-  const rows = all<any>(
+  const rows = await all<any>(
     'SELECT * FROM library_visits WHERE date(signed_in_at) = date(?) ORDER BY signed_in_at ASC',
     [date]
   );

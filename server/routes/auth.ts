@@ -21,13 +21,13 @@ router.post('/login', asyncH(async (req, res) => {
   const data = parse(loginSchema, req.body);
   const rateKey = checkLoginRate(req, data.identifier);
   const identifier = data.identifier.trim();
-  const user = get<any>(
+  const user = await get<any>(
     'SELECT * FROM users WHERE LOWER(email) = LOWER(?) OR UPPER(library_id) = UPPER(?)',
     [identifier, identifier]
   );
   if (!user || !verifyPassword(data.password, user.password_hash)) {
     recordFailedLogin(rateKey);
-    audit({
+    await audit({
       action: 'auth.login_failed',
       entityType: 'user',
       entityId: user?.id ?? null,
@@ -49,16 +49,16 @@ router.post('/login', asyncH(async (req, res) => {
     );
   }
   clearLoginAttempts(rateKey);
-  const token = issueSession(req, res, user, Boolean(data.remember));
-  audit({ userId: user.id, action: 'auth.login', entityType: 'user', entityId: user.id, summary: `${user.first_name} signed in`, ip: clientIp(req) });
+  const token = await issueSession(req, res, user, Boolean(data.remember));
+  await audit({ userId: user.id, action: 'auth.login', entityType: 'user', entityId: user.id, summary: `${user.first_name} signed in`, ip: clientIp(req) });
   res.json({ user: publicUser(user), token, settings: getSettings() });
 }));
 
 router.post('/logout', asyncH(async (req, res) => {
-  if (req.user) audit({ userId: req.user.id, action: 'auth.logout', entityType: 'user', entityId: req.user.id, summary: `${req.user.firstName} signed out` });
+  if (req.user) await audit({ userId: req.user.id, action: 'auth.logout', entityType: 'user', entityId: req.user.id, summary: `${req.user.firstName} signed out` });
   // Revoke every credential this request carried (cookie, bearer header, custom
   // header or query token) so the session cannot be replayed after sign-out.
-  const revoked = (req.authTokens ?? []).filter((token) => revokeSession(token)).length;
+  const revoked = (await Promise.all((req.authTokens ?? []).map((token) => revokeSession(token)))).filter(Boolean).length;
   clearSessionCookie(res);
   res.json({ ok: true, revoked });
 }));
@@ -78,19 +78,19 @@ const registerSchema = z.object({
  */
 router.post('/register', asyncH(async (req, res) => {
   const data = parse(registerSchema, req.body);
-  const existing = get<any>('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', [data.email]);
+  const existing = await get<any>('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', [data.email]);
   if (existing) throw conflict('An account with that email already exists. Try signing in instead.');
   const stamp = nowIso();
-  const libraryId = nextLibraryId();
-  const result = run(
+  const libraryId = await nextLibraryId();
+  const result = await run(
     `INSERT INTO users (school_id, library_id, email, password_hash, first_name, last_name, role, status, class_name, programme, avatar_hue, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, 'student', 'active', ?, ?, ?, ?, ?)`,
     [libraryId, libraryId, data.email.toLowerCase(), hashPassword(data.password), data.firstName, data.lastName,
       data.className ?? null, data.programme ?? null, Math.floor(Math.random() * 360), stamp, stamp]
   );
-  audit({ userId: result.lastInsertRowid, action: 'auth.register', entityType: 'user', entityId: result.lastInsertRowid, summary: `Registered reader ${data.firstName} ${data.lastName} (${libraryId})`, ip: clientIp(req) });
-  const user = get<any>('SELECT * FROM users WHERE id = ?', [result.lastInsertRowid]);
-  const token = issueSession(req, res, user, false);
+  await audit({ userId: result.lastInsertRowid, action: 'auth.register', entityType: 'user', entityId: result.lastInsertRowid, summary: `Registered reader ${data.firstName} ${data.lastName} (${libraryId})`, ip: clientIp(req) });
+  const user = await get<any>('SELECT * FROM users WHERE id = ?', [result.lastInsertRowid]);
+  const token = await issueSession(req, res, user, false);
   res.status(201).json({
     user: publicUser(user),
     token,
@@ -114,7 +114,7 @@ const resetSchema = z.object({
 router.post('/reset-password', asyncH(async (req, res) => {
   const data = parse(resetSchema, req.body);
   const rateKey = checkLoginRate(req, `reset:${data.identifier.toLowerCase()}`);
-  const user = get<any>(
+  const user = await get<any>(
     'SELECT * FROM users WHERE LOWER(email) = LOWER(?) OR UPPER(library_id) = UPPER(?)',
     [data.identifier, data.identifier]
   );
@@ -125,9 +125,9 @@ router.post('/reset-password', asyncH(async (req, res) => {
   }
   if (user.status === 'suspended') throw badRequest('This account is suspended. Please speak to the library.');
   clearLoginAttempts(rateKey);
-  run('UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?',
+  await run('UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?',
     [hashPassword(data.password), nowIso(), user.id]);
-  audit({ userId: user.id, action: 'auth.password_reset', entityType: 'user', entityId: user.id, summary: 'Reset own password with library ID and email', ip: clientIp(req) });
+  await audit({ userId: user.id, action: 'auth.password_reset', entityType: 'user', entityId: user.id, summary: 'Reset own password with library ID and email', ip: clientIp(req) });
   res.json({ ok: true, message: 'Your password has been changed. You can sign in now.' });
 }));
 
@@ -136,7 +136,7 @@ router.get('/me', asyncH(async (req, res) => {
     res.json({ user: null, settings: getSettings() });
     return;
   }
-  const row = get<any>('SELECT * FROM users WHERE id = ?', [req.user.id]);
+  const row = await get<any>('SELECT * FROM users WHERE id = ?', [req.user.id]);
   res.json({
     user: { ...publicUser(row), mustChangePassword: false },
     settings: getSettings(),
@@ -155,12 +155,12 @@ const profileSchema = z.object({
 });
 router.patch('/profile', requireAuth, asyncH(async (req, res) => {
   const data = parse(profileSchema, req.body);
-  const clash = get<any>('SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND id <> ?', [data.email, req.user!.id]);
+  const clash = await get<any>('SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND id <> ?', [data.email, req.user!.id]);
   if (clash) throw conflict('That email address is already used by another account.');
-  run('UPDATE users SET first_name = ?, last_name = ?, phone = ?, email = ?, updated_at = ? WHERE id = ?',
+  await run('UPDATE users SET first_name = ?, last_name = ?, phone = ?, email = ?, updated_at = ? WHERE id = ?',
     [data.firstName, data.lastName, data.phone ?? null, data.email.toLowerCase(), nowIso(), req.user!.id]);
-  audit({ userId: req.user!.id, action: 'profile.update', entityType: 'user', entityId: req.user!.id, summary: 'Updated own profile' });
-  res.json({ user: publicUser(get<any>('SELECT * FROM users WHERE id = ?', [req.user!.id])) });
+  await audit({ userId: req.user!.id, action: 'profile.update', entityType: 'user', entityId: req.user!.id, summary: 'Updated own profile' });
+  res.json({ user: publicUser(await get<any>('SELECT * FROM users WHERE id = ?', [req.user!.id])) });
 }));
 
 const passwordSchema = z.object({
@@ -169,14 +169,14 @@ const passwordSchema = z.object({
 });
 router.post('/change-password', requireAuth, asyncH(async (req, res) => {
   const data = parse(passwordSchema, req.body);
-  const row = get<any>('SELECT * FROM users WHERE id = ?', [req.user!.id]);
+  const row = await get<any>('SELECT * FROM users WHERE id = ?', [req.user!.id]);
   if (!verifyPassword(data.currentPassword, row.password_hash)) throw badRequest('Your current password is not correct.', { currentPassword: 'Incorrect password.' });
   if (data.currentPassword === data.newPassword) throw badRequest('Choose a password you have not used before.');
-  run('UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?',
+  await run('UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?',
     [hashPassword(data.newPassword), nowIso(), req.user!.id]);
-  const refreshed = get<any>('SELECT * FROM users WHERE id = ?', [req.user!.id]);
-  const token = issueSession(req, res, refreshed, false);
-  audit({ userId: req.user!.id, action: 'auth.password_changed', entityType: 'user', entityId: req.user!.id, summary: 'Changed own password' });
+  const refreshed = await get<any>('SELECT * FROM users WHERE id = ?', [req.user!.id]);
+  const token = await issueSession(req, res, refreshed, false);
+  await audit({ userId: req.user!.id, action: 'auth.password_changed', entityType: 'user', entityId: req.user!.id, summary: 'Changed own password' });
   res.json({ ok: true, message: 'Password updated. Other devices have been signed out.', token });
 }));
 

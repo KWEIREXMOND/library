@@ -54,11 +54,11 @@ type SessionPayload = { sub?: string; ver?: number; jti?: string; exp?: number }
 
 const tokenFingerprint = (token: string) => `sha256:${crypto.createHash('sha256').update(token).digest('hex')}`;
 
-function isRevoked(...keys: (string | undefined)[]): boolean {
+async function isRevoked(...keys: (string | undefined)[]): Promise<boolean> {
   const present = keys.filter((key): key is string => Boolean(key));
   if (!present.length) return false;
   const placeholders = present.map(() => '?').join(', ');
-  return Boolean(get(`SELECT 1 AS hit FROM revoked_tokens WHERE jti IN (${placeholders})`, present));
+  return Boolean(await get(`SELECT 1 AS hit FROM revoked_tokens WHERE jti IN (${placeholders})`, present));
 }
 
 /**
@@ -66,7 +66,7 @@ function isRevoked(...keys: (string | undefined)[]): boolean {
  * a signed JWT is otherwise valid until it expires, which would silently sign the
  * user back in on the next page load.
  */
-export function revokeSession(token: string): boolean {
+export async function revokeSession(token: string): Promise<boolean> {
   try {
     const payload = jwt.decode(token) as SessionPayload | null;
     const expiresAt = payload?.exp ? new Date(payload.exp * 1000).toISOString() : new Date(Date.now() + 31 * 864e5).toISOString();
@@ -75,7 +75,7 @@ export function revokeSession(token: string): boolean {
     const keys = [tokenFingerprint(token)];
     if (payload?.jti) keys.push(payload.jti);
     for (const key of keys) {
-      run(
+      await run(
         `INSERT INTO revoked_tokens (jti, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)
          ON CONFLICT(jti) DO NOTHING`,
         [key, payload?.sub ? Number(payload.sub) : null, expiresAt, nowIso()]
@@ -88,8 +88,8 @@ export function revokeSession(token: string): boolean {
 }
 
 /** Drop revocations whose tokens have expired on their own. */
-export function pruneRevokedSessions(): number {
-  const result = run('DELETE FROM revoked_tokens WHERE expires_at < ?', [nowIso()]);
+export async function pruneRevokedSessions(): Promise<number> {
+  const result = await run('DELETE FROM revoked_tokens WHERE expires_at < ?', [nowIso()]);
   return Number(result.changes ?? 0);
 }
 
@@ -107,8 +107,8 @@ export function clearSessionCookie(res: Response) {
   res.clearCookie(COOKIE_NAME, { path: '/', httpOnly: true, sameSite: 'lax' });
 }
 
-function loadAuthUser(id: number): AuthUser | null {
-  const row = get<any>('SELECT * FROM users WHERE id = ?', [id]);
+async function loadAuthUser(id: number): Promise<AuthUser | null> {
+  const row = await get<any>('SELECT * FROM users WHERE id = ?', [id]);
   if (!row) return null;
   return {
     id: row.id,
@@ -123,12 +123,12 @@ function loadAuthUser(id: number): AuthUser | null {
   };
 }
 
-function verifySession(token: string): AuthUser | null {
+async function verifySession(token: string): Promise<AuthUser | null> {
   try {
     const payload = jwt.verify(token, SECRET) as SessionPayload;
     if (!payload.sub) return null;
-    if (isRevoked(payload.jti, tokenFingerprint(token))) return null;
-    const user = loadAuthUser(Number(payload.sub));
+    if (await isRevoked(payload.jti, tokenFingerprint(token))) return null;
+    const user = await loadAuthUser(Number(payload.sub));
     if (!user) return null;
     if (payload.ver !== user.tokenVersion) return null;
     return user;
@@ -166,7 +166,7 @@ function candidateTokens(req: Request): string[] {
   return Array.from(new Set(tokens));
 }
 
-export function authenticate(req: Request, res: Response, next: NextFunction) {
+export async function authenticate(req: Request, res: Response, next: NextFunction) {
   const candidates = candidateTokens(req);
   req.authTokens = candidates;
   const cookie = (req as any).cookies?.[COOKIE_NAME];
@@ -186,14 +186,14 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
   }
 
   for (const token of candidates) {
-    const user = verifySession(token);
+    const user = await verifySession(token);
     if (!user) continue;
     if (user.status === 'suspended') return next(forbidden('Your account has been suspended. Please contact the librarian.'));
     if (user.status !== 'active') return next(forbidden('Your account is not active. Please contact the librarian.'));
     if (bearer && token === bearer && hasCookie) {
       // The explicit token won. If the cookie points at a different (stale)
       // session, drop it so the browser stops sending conflicting credentials.
-      const cookieUser = verifySession(cookie as string);
+      const cookieUser = await verifySession(cookie as string);
       if (!cookieUser || cookieUser.id !== user.id) clearSessionCookie(res);
     }
     req.user = user;
@@ -255,8 +255,8 @@ export function clearLoginAttempts(key: string) {
   attempts.delete(key);
 }
 
-export function issueSession(req: Request, res: Response, user: any, remember = false) {
-  run('UPDATE users SET last_login = ?, updated_at = ? WHERE id = ?', [nowIso(), nowIso(), user.id]);
+export async function issueSession(req: Request, res: Response, user: any, remember = false) {
+  await run('UPDATE users SET last_login = ?, updated_at = ? WHERE id = ?', [nowIso(), nowIso(), user.id]);
   const token = signSession(user, remember);
   setSessionCookie(req, res, token, remember);
   return token;

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { all, db, get, nextLibraryId, nowIso, run, scalar, tx, RESOURCE_DIR, BACKUP_DIR } from '../db.js';
+import { all, execRaw, get, initDb, nextLibraryId, nowIso, run, scalar, tx, RESOURCE_DIR, BACKUP_DIR } from '../db.js';
 import { hashPassword } from '../auth.js';
 import { clearSettingsCache, DEFAULT_SETTINGS } from '../settings.js';
 import { makePdf, wasscePaper } from './pdf.js';
@@ -164,11 +164,8 @@ function classProgramme(className: string) {
   return programme;
 }
 
-const IGNORE_FK = 'PRAGMA foreign_keys = OFF';
-const ENABLE_FK = 'PRAGMA foreign_keys = ON';
 
-function wipe() {
-  db.exec(IGNORE_FK);
+async function wipe() {
   const tables = [
     'notification_deliveries', 'notifications', 'resource_favorites', 'resource_events', 'saved_books',
     'reading_list_items', 'reading_lists', 'stocktake_scans', 'stocktakes', 'payments', 'charges',
@@ -176,19 +173,23 @@ function wipe() {
     'library_visits', 'contact_messages', 'audit_logs', 'password_resets', 'resources', 'copies', 'titles', 'users',
     'categories', 'subjects', 'terms', 'academic_years', 'settings', 'id_sequences',
   ];
-  for (const table of tables) db.exec(`DELETE FROM ${table}`);
-  db.exec(`DELETE FROM sqlite_sequence`);
-  db.exec(ENABLE_FK);
+  // Children first, so foreign keys stay satisfied without disabling them.
+  for (const table of tables) await execRaw(`DELETE FROM ${table}`);
+  try {
+    await execRaw('DELETE FROM sqlite_sequence');
+  } catch {
+    /* sqlite_sequence only exists once an AUTOINCREMENT row has been written */
+  }
 }
 
-function seedAcademicYears() {
+async function seedAcademicYears() {
   const current = new Date().getMonth() >= 8 ? new Date().getFullYear() : new Date().getFullYear() - 1;
   const years = [
     { name: `${current - 1}/${current}`, start: `${current - 1}-09-09`, end: `${current}-07-25`, current: false },
     { name: `${current}/${current + 1}`, start: `${current}-09-09`, end: `${current + 1}-07-24`, current: true },
   ];
   for (const year of years) {
-    const r = run('INSERT INTO academic_years (name, start_date, end_date, is_current) VALUES (?, ?, ?, ?)',
+    const r = await run('INSERT INTO academic_years (name, start_date, end_date, is_current) VALUES (?, ?, ?, ?)',
       [year.name, year.start, year.end, year.current ? 1 : 0]);
     const terms = [
       { name: 'First Term', start: `${year.start.slice(0, 4)}-09-09`, end: `${year.start.slice(0, 4)}-12-18`, current: year.current },
@@ -196,7 +197,7 @@ function seedAcademicYears() {
       { name: 'Third Term', start: `${Number(year.start.slice(0, 4)) + 1}-04-27`, end: `${Number(year.start.slice(0, 4)) + 1}-07-24`, current: false },
     ];
     for (const term of terms) {
-      run('INSERT INTO terms (academic_year_id, name, start_date, end_date, is_current) VALUES (?, ?, ?, ?, ?)',
+      await run('INSERT INTO terms (academic_year_id, name, start_date, end_date, is_current) VALUES (?, ?, ?, ?, ?)',
         [r.lastInsertRowid, term.name, term.start, term.end, term.current ? 1 : 0]);
     }
   }
@@ -204,15 +205,15 @@ function seedAcademicYears() {
 
 type SeedUser = { id: number; schoolId: string; libraryId: string; firstName: string; lastName: string; role: string; className: string | null; email: string; status: string; house?: string | null };
 
-function addUser(opts: {
+async function addUser(opts: {
   schoolId: string; email: string; firstName: string; lastName: string; role: string;
   passwordHash: string; status?: string; className?: string | null; programme?: string | null;
   department?: string | null; phone?: string; gender?: string; house?: string | null;
-}): SeedUser {
+}): Promise<SeedUser> {
   const stamp = nowIso();
   // Demo accounts are library members too: issue a library number at creation.
-  const libraryId = nextLibraryId(new Date(stamp));
-  const r = run(
+  const libraryId = await nextLibraryId(new Date(stamp));
+  const r = await run(
     `INSERT INTO users (school_id, library_id, email, password_hash, first_name, last_name, role, status, class_name,
       programme, department, phone, gender, house, avatar_hue, last_login, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -228,10 +229,11 @@ function addUser(opts: {
   };
 }
 
-export function seed(options: { force?: boolean } = {}) {
-  const existing = scalar<number>('SELECT COUNT(*) FROM users');
+export async function seed(options: { force?: boolean } = {}) {
+  await initDb();
+  const existing = await scalar<number>('SELECT COUNT(*) FROM users');
   if (existing > 0 && !options.force) return { seeded: false, users: existing };
-  if (options.force) wipe();
+  if (options.force) await wipe();
   clearSettingsCache();
 
   seedState = 20261020;
@@ -244,19 +246,18 @@ export function seed(options: { force?: boolean } = {}) {
     common: hashPassword('Library@123'),
   };
 
-  tx(() => {
-    seedAcademicYears();
+  await tx(async () => {
+    await seedAcademicYears();
 
     // Categories + subjects
     const categoryIds = new Map<string, number>();
-    CATEGORIES.forEach((category, index) => {
-      const r = run('INSERT INTO categories (name, slug, description, icon, sort_order) VALUES (?, ?, ?, ?, ?)',
+for (const [index, category] of CATEGORIES.entries()) {
+      const r = await run('INSERT INTO categories (name, slug, description, icon, sort_order) VALUES (?, ?, ?, ?, ?)',
         [category.name, category.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''), category.description, category.icon, index]);
       categoryIds.set(category.name, r.lastInsertRowid);
-    });
-    const subjectIds = new Map<string, number>();
+    }    const subjectIds = new Map<string, number>();
     for (const [name, code] of SUBJECTS) {
-      const r = run('INSERT INTO subjects (name, code, description) VALUES (?, ?, ?)',
+      const r = await run('INSERT INTO subjects (name, code, description) VALUES (?, ?, ?)',
         [name, code, `Senior high school ${name.toLowerCase()} collection.`]);
       subjectIds.set(code, r.lastInsertRowid);
     }
@@ -274,7 +275,7 @@ export function seed(options: { force?: boolean } = {}) {
       const categoryId = categoryIds.get(book.category) ?? null;
       const subjectId = subjectIds.get(book.subject) ?? null;
       const colour = book.color ?? palette[bookIndex % palette.length];
-      const r = run(
+      const r = await run(
         `INSERT INTO titles (isbn, title, author, publisher, published_year, edition, language, description,
           category_id, subject_id, programme, class_level, pages, cover_color, cover_style, featured, archived_at,
           created_by, created_at, updated_at)
@@ -290,7 +291,7 @@ export function seed(options: { force?: boolean } = {}) {
         barcodeSeq++;
         accessionSeq++;
         const condition = book.archived ? 'fair' : pick(['new', 'good', 'good', 'good', 'fair', 'poor']);
-        const c = run(
+        const c = await run(
           `INSERT INTO copies (title_id, barcode, accession_no, shelf, rack, section, condition, status, acquisition,
             acquired_on, cost, donor, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, 'available', ?, ?, ?, ?, ?, ?)`,
@@ -312,29 +313,28 @@ export function seed(options: { force?: boolean } = {}) {
     };
 
     // Users
-    const admin = addUser({ schoolId: 'ADM-001', email: 'admin@tema.edu.gh', firstName: 'Akosua', lastName: 'Mensah', role: 'admin', passwordHash: pub.admin, department: 'Administration', gender: 'female' });
-    const librarian = addUser({ schoolId: 'LIB-001', email: 'librarian@tema.edu.gh', firstName: 'Efua', lastName: 'Owusu', role: 'librarian', passwordHash: pub.librarian, department: 'Library', gender: 'female' });
-    const librarian2 = addUser({ schoolId: 'LIB-002', email: 'k.asante@tema.edu.gh', firstName: 'Kwame', lastName: 'Asante', role: 'librarian', passwordHash: pub.common, department: 'Library', gender: 'male' });
+    const admin = await addUser({ schoolId: 'ADM-001', email: 'admin@tema.edu.gh', firstName: 'Akosua', lastName: 'Mensah', role: 'admin', passwordHash: pub.admin, department: 'Administration', gender: 'female' });
+    const librarian = await addUser({ schoolId: 'LIB-001', email: 'librarian@tema.edu.gh', firstName: 'Efua', lastName: 'Owusu', role: 'librarian', passwordHash: pub.librarian, department: 'Library', gender: 'female' });
+    const librarian2 = await addUser({ schoolId: 'LIB-002', email: 'k.asante@tema.edu.gh', firstName: 'Kwame', lastName: 'Asante', role: 'librarian', passwordHash: pub.common, department: 'Library', gender: 'male' });
 
-    const teacherDemo = addUser({ schoolId: 'TCH-001', email: 'teacher@tema.edu.gh', firstName: 'Daniel', lastName: 'Appiah', role: 'teacher', passwordHash: pub.teacher, department: 'English', gender: 'male' });
+    const teacherDemo = await addUser({ schoolId: 'TCH-001', email: 'teacher@tema.edu.gh', firstName: 'Daniel', lastName: 'Appiah', role: 'teacher', passwordHash: pub.teacher, department: 'English', gender: 'male' });
     const teacherNames = [
       ['Grace', 'Addo', 'Mathematics'], ['Yaw', 'Frimpong', 'Science'], ['Priscilla', 'Owusu-Ansah', 'Social Studies'],
       ['Michael', 'Amoah', 'ICT'], ['Comfort', 'Tetteh', 'Business'], ['Isaac', 'Osei', 'Languages'],
       ['Naa', 'Quaye', 'Arts'], ['Joseph', 'Baidoo', 'Science'], ['Abigail', 'Annan', 'Careers'],
     ] as [string, string, string][];
     const teachers: SeedUser[] = [teacherDemo];
-    teacherNames.forEach(([first, last, dept], index) => {
-      teachers.push(addUser({
+for (const [index, [first, last, dept]] of teacherNames.entries()) {
+      teachers.push(await addUser({
         schoolId: `TCH-${String(index + 2).padStart(3, '0')}`,
         email: `${first.toLowerCase()}.${last.toLowerCase().replace(/[^a-z]/g, '')}@tema.edu.gh`,
         firstName: first, lastName: last, role: 'teacher', passwordHash: pub.common,
         department: dept, gender: index % 2 === 0 ? 'female' : 'male',
         house: HOUSES[index % HOUSES.length],
       }));
-    });
-
+    }
     const students: SeedUser[] = [];
-    const demoStudent = addUser({
+    const demoStudent = await addUser({
       schoolId: 'TSS-2024-001', email: 'student@tema.edu.gh', firstName: 'Ama', lastName: 'Boateng',
       role: 'student', passwordHash: pub.student, className: 'Form 2 Science A',
       programme: 'General Science', gender: 'female', house: 'House 1',
@@ -347,7 +347,7 @@ export function seed(options: { force?: boolean } = {}) {
       const className = CLASSES[i % CLASSES.length];
       const schoolId = `TSS-2026-${String(i + 2).padStart(3, '0')}`;
       const status = i === 9 ? 'suspended' : i === 17 ? 'pending' : i === 27 ? 'graduated' : i === 33 ? 'transferred' : 'active';
-      students.push(addUser({
+      students.push(await addUser({
         schoolId, email: `${first.toLowerCase().replace(/[^a-z]/g, '')}.${last.toLowerCase()}${i + 1}@student.tema.edu.gh`,
         firstName: first, lastName: last, role: 'student', passwordHash: pub.common,
         className, programme: classProgramme(className), status, gender: female ? 'female' : 'male',
@@ -362,20 +362,20 @@ export function seed(options: { force?: boolean } = {}) {
     const chargedLoans: { loanId: number; userId: number; amount: number; days: number; title: string }[] = [];
     const borrowerPool = [...students.filter((s) => s.status === 'active'), ...teachers];
 
-    const issueLoanSeed = (opts: {
+    const issueLoanSeed = async (opts: {
       copy: CopyState; user: SeedUser; issuedBy: number; issue: string; due: string; returnDate?: string | null;
       status?: string; renewal?: number; lost?: boolean;
     }) => {
       const status = opts.status ?? (opts.lost ? 'lost' : opts.returnDate ? 'returned' : 'active');
-      const r = run(
+      const r = await run(
         `INSERT INTO loans (copy_id, user_id, issued_by, issue_date, due_date, return_date, returned_by, renewal_count, status, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [opts.copy.id, opts.user.id, opts.issuedBy, opts.issue, opts.due, opts.returnDate ?? null,
           opts.returnDate ? opts.issuedBy : null, opts.renewal ?? 0, status, opts.issue]
       );
-      run(`INSERT INTO loan_events (loan_id, type, actor_id, created_at) VALUES (?, 'issued', ?, ?)`, [r.lastInsertRowid, opts.issuedBy, opts.issue]);
+      await run(`INSERT INTO loan_events (loan_id, type, actor_id, created_at) VALUES (?, 'issued', ?, ?)`, [r.lastInsertRowid, opts.issuedBy, opts.issue]);
       if (opts.returnDate) {
-        run(`INSERT INTO loan_events (loan_id, type, actor_id, created_at) VALUES (?, 'returned', ?, ?)`, [r.lastInsertRowid, opts.issuedBy, opts.returnDate]);
+        await run(`INSERT INTO loan_events (loan_id, type, actor_id, created_at) VALUES (?, 'returned', ?, ?)`, [r.lastInsertRowid, opts.issuedBy, opts.returnDate]);
       }
       if (opts.lost) {
         opts.copy.status = 'lost';
@@ -397,7 +397,7 @@ export function seed(options: { force?: boolean } = {}) {
       const returnedAt = new Date(new Date(issue).getTime() + returnOffset * 86400000);
       if (returnedAt.getTime() >= Date.now() - 86400000) continue;
       const returnDate = returnedAt.toISOString();
-      const loanId = issueLoanSeed({ copy, user, issuedBy: librarian.id, issue, due, returnDate });
+      const loanId = await issueLoanSeed({ copy, user, issuedBy: librarian.id, issue, due, returnDate });
       const overdue = Math.floor((returnedAt.getTime() - new Date(due).getTime()) / 86400000);
       if (late && overdue > 2) {
         const amount = Math.min((overdue - 2) * DEFAULT_SETTINGS.overdueRatePerDay, DEFAULT_SETTINGS.maxFine);
@@ -412,9 +412,9 @@ export function seed(options: { force?: boolean } = {}) {
       const user = students[between(1, students.length - 1)];
       const issue = isoDays(between(70, 140), 11);
       const due = new Date(new Date(issue).getTime() + 14 * 86400000).toISOString();
-      const loanId = issueLoanSeed({ copy, user, issuedBy: librarian.id, issue, due, returnDate: isoDays(between(20, 50), 14), lost: true });
+      const loanId = await issueLoanSeed({ copy, user, issuedBy: librarian.id, issue, due, returnDate: isoDays(between(20, 50), 14), lost: true });
       copy.status = 'lost';
-      run(`INSERT INTO charges (user_id, loan_id, type, amount, description, status, created_by, created_at)
+      await run(`INSERT INTO charges (user_id, loan_id, type, amount, description, status, created_by, created_at)
            VALUES (?, ?, 'lost', 60, 'Replacement cost — lost book', 'outstanding', ?, ?)`,
         [user.id, loanId, librarian.id, isoDays(between(19, 49), 15)]);
     }
@@ -429,7 +429,7 @@ export function seed(options: { force?: boolean } = {}) {
       }
       return pool.length ? pick(pool) : null;
     };
-    const issueActive = (user: SeedUser, dueInDays: number, preferredTitle?: string) => {
+    const issueActive = async (user: SeedUser, dueInDays: number, preferredTitle?: string) => {
       const copy = chooseAvailable(preferredTitle);
       if (!copy) return null;
       activeCopyIds.add(copy.id);
@@ -437,13 +437,13 @@ export function seed(options: { force?: boolean } = {}) {
       activeCounts.set(user.id, (activeCounts.get(user.id) ?? 0) + 1);
       const issued = isoDays(between(3, 20), between(9, 14));
       const due = new Date(Date.now() + dueInDays * 86400000).toISOString();
-      return issueLoanSeed({ copy, user, issuedBy: librarian.id, issue: issued, due });
+      return await issueLoanSeed({ copy, user, issuedBy: librarian.id, issue: issued, due });
     };
 
-    issueActive(demoStudent, 4, 'Things Fall Apart');
-    issueActive(demoStudent, -3, 'Purple Hibiscus');
-    issueActive(teacherDemo, 12, 'Campbell Biology');
-    issueActive(teacherDemo, 20, 'English Grammar in Use');
+    await issueActive(demoStudent, 4, 'Things Fall Apart');
+    await issueActive(demoStudent, -3, 'Purple Hibiscus');
+    await issueActive(teacherDemo, 12, 'Campbell Biology');
+    await issueActive(teacherDemo, 20, 'English Grammar in Use');
 
     // Recent finished reads for the demo student so the termly reading challenge shows progress.
     for (const [daysAgo, title] of [[18, 'The Old Man and the Sea'], [9, 'Animal Farm']] as Array<[number, string]>) {
@@ -451,7 +451,7 @@ export function seed(options: { force?: boolean } = {}) {
       if (!copy) continue;
       activeCopyIds.add(copy.id);
       activeCounts.set(demoStudent.id, (activeCounts.get(demoStudent.id) ?? 0) + 1);
-      issueLoanSeed({
+      await issueLoanSeed({
         copy,
         user: demoStudent,
         issuedBy: librarian.id,
@@ -467,20 +467,20 @@ export function seed(options: { force?: boolean } = {}) {
       if (student.id === demoStudent.id || student.status !== 'active') continue;
       const count = planIndex < activePlan.length ? between(0, 1) : (rng() > 0.75 ? 1 : 0);
       for (let n = 0; n < count; n++) {
-        if (issueActive(student, activePlan[planIndex] ?? between(-10, 20))) planIndex++;
+        if (await issueActive(student, activePlan[planIndex] ?? between(-10, 20))) planIndex++;
       }
       if (planIndex >= activePlan.length + 4) break;
     }
     for (const teacher of teachers.slice(1)) {
-      if (rng() > 0.55) issueActive(teacher, between(-4, 25));
+      if (rng() > 0.55) await issueActive(teacher, between(-4, 25));
     }
 
     // Charges for late historical returns
-    chargedLoans.forEach((entry, index) => {
+for (const [index, entry] of chargedLoans.entries()) {
       const status = index % 4 === 0 ? 'paid' : index % 7 === 0 ? 'waived' : index % 3 === 0 ? 'partial' : 'outstanding';
       const paid = status === 'paid' ? entry.amount : status === 'partial' ? Math.round(entry.amount * 0.5 * 100) / 100 : 0;
       const waived = status === 'waived' ? entry.amount : 0;
-      const charge = run(
+      const charge = await run(
         `INSERT INTO charges (user_id, loan_id, type, amount, paid_amount, waived_amount, description, status, created_by, created_at, settled_at)
          VALUES (?, ?, 'overdue', ?, ?, ?, ?, ?, ?, ?, ?)`,
         [entry.userId, entry.loanId, entry.amount, paid, waived,
@@ -488,14 +488,13 @@ export function seed(options: { force?: boolean } = {}) {
           status === 'outstanding' || status === 'partial' ? null : isoDays(between(5, 30), 15)]
       );
       if (paid > 0) {
-        run(`INSERT INTO payments (charge_id, amount, method, reference, notes, received_by, created_at)
+        await run(`INSERT INTO payments (charge_id, amount, method, reference, notes, received_by, created_at)
              VALUES (?, ?, ?, ?, 'Paid at the library desk', ?, ?)`,
           [charge.lastInsertRowid, paid, pick(['cash', 'momo']), `RCPT-${between(10000, 99999)}`, librarian.id, isoDays(between(1, 25), 16)]);
       }
-    });
-
+    }
     // Overdue charges for active overdue loans
-    const overdueActive = all<any>(
+    const overdueActive = await all<any>(
       `SELECT l.id, l.user_id, l.due_date, u.first_name, t.title FROM loans l
        JOIN users u ON u.id = l.user_id JOIN copies c ON c.id = l.copy_id JOIN titles t ON t.id = c.title_id
        WHERE l.status = 'active' AND date(l.due_date) < date('now') LIMIT 3`
@@ -504,7 +503,7 @@ export function seed(options: { force?: boolean } = {}) {
       const days = Math.floor((Date.now() - new Date(loan.due_date).getTime()) / 86400000);
       const amount = Math.min(Math.max(0, days - 2) * DEFAULT_SETTINGS.overdueRatePerDay, DEFAULT_SETTINGS.maxFine);
       if (amount > 0) {
-        run(`INSERT INTO charges (user_id, loan_id, type, amount, description, status, created_by, created_at)
+        await run(`INSERT INTO charges (user_id, loan_id, type, amount, description, status, created_by, created_at)
              VALUES (?, ?, 'overdue', ?, ?, 'outstanding', ?, ?)`,
           [loan.user_id, loan.id, amount, `${days} days overdue — “${loan.title}”`, librarian.id, isoDays(2, 11)]);
       }
@@ -524,38 +523,37 @@ export function seed(options: { force?: boolean } = {}) {
         copy.status = 'borrowed';
         activeCounts.set(user.id, (activeCounts.get(user.id) ?? 0) + 1);
         const due = new Date(Date.now() + between(4, 16) * 86400000).toISOString();
-        issueLoanSeed({ copy, user, issuedBy: librarian.id, issue: isoDays(between(3, 12), 11), due });
+        await issueLoanSeed({ copy, user, issuedBy: librarian.id, issue: isoDays(between(3, 12), 11), due });
       }
     }
     const demandTitleIds = demandTitles.map((title) => titleIds.get(title)).filter((id): id is number => Boolean(id));
     const waitingStudents = students.filter((s) => s.status === 'active' && s.id !== demoStudent.id);
     let queueSeedIndex = 0;
-    demandTitleIds.forEach((titleId, index) => {
+for (const [index, titleId] of demandTitleIds.entries()) {
       for (let position = 0; position < 2; position++) {
         const user = waitingStudents[(queueSeedIndex++) % waitingStudents.length];
-        run(`INSERT INTO reservations (title_id, user_id, status, queue_position, created_at) VALUES (?, ?, 'waiting', ?, ?)`,
+        await run(`INSERT INTO reservations (title_id, user_id, status, queue_position, created_at) VALUES (?, ?, 'waiting', ?, ?)`,
           [titleId, user.id, position + 1, isoDays(between(2, 14), 11)]);
       }
       if (index === 0) {
-        run(`INSERT INTO reservations (title_id, user_id, status, queue_position, created_at) VALUES (?, ?, 'waiting', 3, ?)`,
+        await run(`INSERT INTO reservations (title_id, user_id, status, queue_position, created_at) VALUES (?, ?, 'waiting', 3, ?)`,
           [titleId, demoStudent.id, isoDays(1, 10)]);
       }
-    });
-    // A ready hold on a title that still has a shelved copy.
+    }    // A ready hold on a title that still has a shelved copy.
     const holdTitleId = titleIds.get('The Book Thief') ?? demandTitleIds[0];
     const holdCopy = copies.find((c) => c.titleId === holdTitleId && c.status === 'available');
     const holdUser = waitingStudents.find((s) => s.id !== demoStudent.id && (activeCounts.get(s.id) ?? 0) < 2);
     if (holdTitleId && holdCopy && holdUser) {
       holdCopy.status = 'reserved';
-      run(`UPDATE copies SET status = 'reserved', updated_at = ? WHERE id = ?`, [isoDays(1, 9), holdCopy.id]);
-      run(`INSERT INTO reservations (title_id, user_id, status, queue_position, created_at, ready_at, expires_at)
+      await run(`UPDATE copies SET status = 'reserved', updated_at = ? WHERE id = ?`, [isoDays(1, 9), holdCopy.id]);
+      await run(`INSERT INTO reservations (title_id, user_id, status, queue_position, created_at, ready_at, expires_at)
            VALUES (?, ?, 'ready', 1, ?, ?, ?)`,
         [holdTitleId, holdUser.id, isoDays(4, 9), isoDays(1, 9), new Date(Date.now() + 2 * 86400000).toISOString()]);
     }
 
     // Persist copy statuses
-    run(`UPDATE copies SET status = 'borrowed' WHERE id IN (SELECT copy_id FROM loans WHERE status = 'active')`);
-    run(`UPDATE copies SET status = 'lost' WHERE id IN (SELECT copy_id FROM loans WHERE status = 'lost')`);
+    await run(`UPDATE copies SET status = 'borrowed' WHERE id IN (SELECT copy_id FROM loans WHERE status = 'active')`);
+    await run(`UPDATE copies SET status = 'lost' WHERE id IN (SELECT copy_id FROM loans WHERE status = 'lost')`);
 
     // Digital resources
     fs.mkdirSync(RESOURCE_DIR, { recursive: true });
@@ -574,7 +572,7 @@ export function seed(options: { force?: boolean } = {}) {
       return name;
     };
 
-    const addResource = (opts: {
+    const addResource = async (opts: {
       title: string; description: string; kind: string; subjectCode?: string; examYear?: number; paper?: string;
       level?: string; author?: string; publisher?: string; publishedYear?: number; allowDownload: boolean;
       access: string; status?: string; submittedBy: number; views: number; downloads: number; daysAgo: number;
@@ -589,7 +587,7 @@ export function seed(options: { force?: boolean } = {}) {
       const category = opts.category ?? ({
         wassce: 'Past questions', notes: 'Study guides', handout: 'Workbooks', syllabus: 'Syllabus',
       } as Record<string, string>)[opts.kind] ?? 'Library';
-      const r = run(
+      const r = await run(
         `INSERT INTO resources (title, description, kind, category, subject_id, exam_year, paper, level, author, publisher,
           published_year, language, file_key, file_name, file_mime, file_size, cover_color, allow_download, access,
           status, submitted_by, approved_by, approved_at, view_count, download_count, created_at, updated_at)
@@ -624,8 +622,8 @@ export function seed(options: { force?: boolean } = {}) {
       { subject: 'Literature in English', code: 'LIT', year: 2023, paper: 'Paper 2' },
       { subject: 'Financial Accounting', code: 'ACC', year: 2022, paper: 'Paper 1' },
     ];
-    wasscePlan.forEach((paper, index) => {
-      addResource({
+for (const [index, paper] of wasscePlan.entries()) {
+      await addResource({
         title: `WASSCE ${paper.subject} ${paper.year} — ${paper.paper}`,
         description: `West African Senior School Certificate Examination ${paper.subject} paper for ${paper.year}. Exam-style questions with a sample marking scheme for revision.`,
         kind: 'wassce', subjectCode: paper.code, examYear: paper.year, paper: paper.paper, level: 'SHS 3',
@@ -636,8 +634,7 @@ export function seed(options: { force?: boolean } = {}) {
         meta: [`Subject: ${paper.subject}`, `Paper: ${paper.paper}  |  Duration: 2 hours 30 minutes`, 'Sample revision paper — Libra digital library'],
         body: wasscePaper(paper.subject, paper.year, paper.paper).body,
       });
-    });
-
+    }
     const ebooks: [string, string, string, number, string[]][] = [
       ['West African Literature: A Student Companion', 'LIT', 'A guide to the major West African novels, plays and poems studied at senior high school.', 2022, ['Reading African literature', 'Things Fall Apart remains one of the most widely studied novels in West Africa. This companion explores its themes, characters and context, with essay questions and model answers.', 'Each chapter closes with discussion questions, key quotations and suggestions for further reading.']],
       ['Study Skills for Senior High School', 'LSK', 'Practical advice on time management, note-taking, revision and examination technique.', 2023, ['Successful study is a set of habits', 'This short guide covers planning a study timetable, active reading, memory techniques and preparing for examinations.', 'Set aside a regular time each day. Review your notes within 24 hours. Practise past questions under timed conditions.']],
@@ -647,16 +644,15 @@ export function seed(options: { force?: boolean } = {}) {
       ['Digital Citizenship Handbook', 'ICT', 'Staying safe, respectful and effective online — a handbook for students and teachers.', 2024, ['Being a good digital citizen', 'This handbook covers password security, privacy, respectful communication, spotting misinformation and healthy screen habits.', 'Treat every online space as a public space. Think before you post, and never share another person\'s personal information.']],
     ];
     const ebookCategories = ['Literature', 'Study skills', 'History', 'Science', 'Literature', 'Reference'];
-    ebooks.forEach(([title, code, description, year, body], index) => {
-      addResource({
+for (const [index, [title, code, description, year, body]] of ebooks.entries()) {
+      await addResource({
         title, description, kind: 'ebook', category: ebookCategories[index], subjectCode: code, allowDownload: index % 3 !== 0, access: 'all',
         submittedBy: librarian.id, views: between(40, 260), downloads: between(8, 110), daysAgo: between(15, 200),
         author: 'Tema Secondary Library Editorial Team', publisher: 'Tema Educational Press', publishedYear: year,
         color: ['#5B4636', '#245C4A', '#3B4A6B', '#6E2D21', '#6B3A5E', '#1F4A35'][index],
         subtitle: 'Tema Secondary School digital library', body,
       });
-    });
-
+    }
     const notes: [string, string, string, string[]][] = [
       ['Core Mathematics Formula Booklet', 'MTH', 'Every formula needed for the core mathematics examination, in one printable booklet.', ['Algebra: quadratic formula', 'For ax² + bx + c = 0, x = (-b ± √(b² - 4ac)) / 2a.', 'Mensuration, trigonometry, statistics and probability formulae are collected in this booklet.', 'Use it alongside past questions, not instead of them.']],
       ['Biology Revision Notes — Genetics', 'BIO', 'Mendelian genetics, DNA, mutation and biotechnology summarised for revision.', ['Genetics essentials', 'Genes are units of inheritance found on chromosomes. Alleles are alternative forms of a gene.', 'Practice dihybrid crosses and pedigree diagrams. Define key terms precisely.']],
@@ -664,44 +660,41 @@ export function seed(options: { force?: boolean } = {}) {
       ['Integrated Science Practical Guide', 'SCI', 'Experimental skills, data handling and practical question technique for core science.', ['Preparing for the practical exam', 'Read the whole question before touching the apparatus. Write observations, not conclusions.', 'Record units. Draw tables with ruled lines. State sources of error honestly.']],
       ['Government Essay Questions', 'GOV', 'A bank of essay questions with outline answers on Ghanaian government and politics.', ['Practising essay questions', 'Select questions that ask you to analyse, discuss or evaluate — then plan before writing.', 'Refer to the 1992 Constitution, the separation of powers and the role of the civil service where relevant.']],
     ];
-    notes.forEach(([title, code, description, body], index) => {
-      addResource({
+for (const [index, [title, code, description, body]] of notes.entries()) {
+      await addResource({
         title, description, kind: 'notes', subjectCode: code, allowDownload: true, access: 'all',
         submittedBy: librarian.id, views: between(20, 180), downloads: between(5, 80), daysAgo: between(10, 160),
         author: 'Tema Secondary Library Study Support', color: ['#8C5A1C', '#245C4A', '#5B4636', '#3E5C63', '#6E2D21'][index],
         subtitle: 'Revision notes', body,
       });
-    });
-
+    }
     const handouts: [string, string, string, string, number][] = [
       ['Physics: Waves Worksheet', 'PHY', 'Teacher handout with practice problems on wave motion, sound and light.', 'Yaw Frimpong', 6],
       ['Accounting: Trial Balance Exercises', 'ACC', 'Graded trial balance and correction-of-errors exercises with answers.', 'Comfort Tetteh', 5],
       ['Literature: Things Fall Apart Study Guide', 'LIT', 'Chapter questions, character maps and essay prompts.', 'Daniel Appiah', 4],
     ];
-    handouts.forEach(([title, code, description, author, daysAgo]) => {
-      addResource({
+for (const [title, code, description, author, daysAgo] of handouts) {
+      await addResource({
         title, description, kind: 'handout', subjectCode: code, allowDownload: true, access: 'all',
         submittedBy: teachers[1]?.id ?? librarian.id, views: between(10, 90), downloads: between(2, 40),
         daysAgo, author, color: '#7A3B2E', subtitle: 'Teacher handout',
         body: ['Worksheet instructions', 'Complete all questions in your exercise book. Show your working clearly.', 'Submit your work to your subject teacher by the end of the week.'] ,
       });
-    });
-
+    }
     const syllabi: [string, string][] = [
       ['WAEC Core Mathematics Syllabus', 'MTH'], ['GES English Language Syllabus', 'ENG'],
     ];
-    syllabi.forEach(([title, code]) => {
-      addResource({
+for (const [title, code] of syllabi) {
+      await addResource({
         title, description: 'Official syllabus outline, objectives and assessment structure.', kind: 'syllabus',
         subjectCode: code, allowDownload: true, access: 'all', submittedBy: librarian.id,
         views: between(15, 120), downloads: between(4, 55), daysAgo: between(30, 240), color: '#3B4A6B',
         subtitle: 'Curriculum document',
         body: ['Aims and objectives', 'The syllabus sets out the knowledge, skills and attitudes expected at each level.', 'Assessment combines continuous assessment with a final external examination.'],
       });
-    });
-
+    }
     // Pending + rejected teacher submissions
-    const pendingId = addResource({
+    const pendingId = await addResource({
       title: 'Form 2 Science — Cell Division Worksheet', description: 'Teacher-prepared worksheet on mitosis and meiosis with diagrams and answers.',
       kind: 'handout', subjectCode: 'BIO', allowDownload: false, access: 'students', status: 'pending',
       submittedBy: teachers[2]?.id ?? teacherDemo.id, views: 0, downloads: 0, daysAgo: 2,
@@ -709,7 +702,7 @@ export function seed(options: { force?: boolean } = {}) {
       body: ['Mitosis and meiosis', '1. State three differences between mitosis and meiosis.', '2. Draw labelled diagrams of the stages of mitosis in an onion root tip cell.', '3. Explain the importance of crossing over during meiosis.'],
     });
     void pendingId;
-    addResource({
+    await addResource({
       title: 'Economics Field Trip Notes', description: 'Unofficial notes from a market visit — submitted without sources.',
       kind: 'notes', subjectCode: 'ECO', allowDownload: true, access: 'students', status: 'rejected',
       submittedBy: teachers[5]?.id ?? teacherDemo.id, views: 0, downloads: 0, daysAgo: 6,
@@ -718,42 +711,38 @@ export function seed(options: { force?: boolean } = {}) {
     });
 
     // Resource events & favourites
-    const approvedResources = all<any>(`SELECT id FROM resources WHERE status = 'approved'`);
+    const approvedResources = await all<any>(`SELECT id FROM resources WHERE status = 'approved'`);
     for (let i = 0; i < 60; i++) {
       const resource = pick(approvedResources);
       const user = pick(students.filter((s) => s.status === 'active'));
-      run(`INSERT OR IGNORE INTO resource_events (resource_id, user_id, type, created_at) VALUES (?, ?, 'view', ?)`,
+      await run(`INSERT OR IGNORE INTO resource_events (resource_id, user_id, type, created_at) VALUES (?, ?, 'view', ?)`,
         [resource.id, user.id, isoDays(between(1, 30), between(8, 16))]);
     }
     ['Things Fall Apart', 'Purple Hibiscus', 'Campbell Biology'].forEach(() => {});
-    approvedResources.slice(0, 3).forEach((resource) => {
-      run(`INSERT OR IGNORE INTO resource_favorites (user_id, resource_id, created_at) VALUES (?, ?, ?)`,
+for (const resource of approvedResources.slice(0, 3)) {
+      await run(`INSERT OR IGNORE INTO resource_favorites (user_id, resource_id, created_at) VALUES (?, ?, ?)`,
         [demoStudent.id, resource.id, isoDays(between(2, 20), 12)]);
-    });
-
+    }
     // Saved books
-    ['Things Fall Apart', 'Half of a Yellow Sun', 'How to Solve It'].forEach((title, index) => {
+for (const [index, title] of ['Things Fall Apart', 'Half of a Yellow Sun', 'How to Solve It'].entries()) {
       const status = index === 0 ? 'finished' : index === 1 ? 'reading' : 'want';
-      run(`INSERT OR IGNORE INTO saved_books (user_id, title_id, status, progress, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      await run(`INSERT OR IGNORE INTO saved_books (user_id, title_id, status, progress, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
         [demoStudent.id, tid(title), status, status === 'finished' ? 100 : status === 'reading' ? 45 : 0, isoDays(20 - index, 12), isoDays(3, 12)]);
-    });
-
+    }
     // Reading lists
-    const literatureList = run(`INSERT INTO reading_lists (owner_id, title, description, subject_id, class_level, is_published, created_at, updated_at)
+    const literatureList = await run(`INSERT INTO reading_lists (owner_id, title, description, subject_id, class_level, is_published, created_at, updated_at)
       VALUES (?, 'African Literature Essentials', 'The novels and plays we will study this term, in reading order.', ?, 'Form 3 Arts A', 1, ?, ?)`,
       [teacherDemo.id, subjectIds.get('LIT') ?? null, isoDays(30, 9), isoDays(4, 9)]);
-    ['Things Fall Apart', 'The Beautyful Ones Are Not Yet Born', 'Purple Hibiscus', 'Death and the King\u2019s Horseman', 'So Long a Letter'].forEach((title, index) => {
-      run(`INSERT INTO reading_list_items (list_id, title_id, note, position) VALUES (?, ?, ?, ?)`,
+for (const [index, title] of ['Things Fall Apart', 'The Beautyful Ones Are Not Yet Born', 'Purple Hibiscus', 'Death and the King\u2019s Horseman', 'So Long a Letter'].entries()) {
+      await run(`INSERT INTO reading_list_items (list_id, title_id, note, position) VALUES (?, ?, ?, ?)`,
         [literatureList.lastInsertRowid, tid(title), index === 0 ? 'Start here — read chapters 1–6 for the first class.' : null, index + 1]);
-    });
-    const scienceList = run(`INSERT INTO reading_lists (owner_id, title, description, subject_id, class_level, is_published, created_at, updated_at)
+    }    const scienceList = await run(`INSERT INTO reading_lists (owner_id, title, description, subject_id, class_level, is_published, created_at, updated_at)
       VALUES (?, 'Form 2 Science — Wider Reading', 'Popular science books and revision resources to stretch beyond the textbook.', ?, 'Form 2 Science A', 1, ?, ?)`,
       [teachers[2]?.id ?? teacherDemo.id, subjectIds.get('BIO') ?? null, isoDays(18, 10), isoDays(6, 10)]);
-    ['A Brief History of Time', 'The Selfish Gene', 'Campbell Biology', 'Silent Spring'].forEach((title, index) => {
-      run(`INSERT INTO reading_list_items (list_id, title_id, note, position) VALUES (?, ?, ?, ?)`,
+for (const [index, title] of ['A Brief History of Time', 'The Selfish Gene', 'Campbell Biology', 'Silent Spring'].entries()) {
+      await run(`INSERT INTO reading_list_items (list_id, title_id, note, position) VALUES (?, ?, ?, ?)`,
         [scienceList.lastInsertRowid, tid(title), null, index + 1]);
-    });
-    run(`INSERT INTO reading_lists (owner_id, title, description, subject_id, class_level, is_published, created_at, updated_at)
+    }    await run(`INSERT INTO reading_lists (owner_id, title, description, subject_id, class_level, is_published, created_at, updated_at)
       VALUES (?, 'WASSCE Mathematics Boosters', 'Draft list of revision materials for Form 3 students.', ?, 'Form 3 Science A', 0, ?, ?)`,
       [librarian.id, subjectIds.get('MTH') ?? null, isoDays(5, 11), isoDays(2, 11)]);
 
@@ -765,12 +754,11 @@ export function seed(options: { force?: boolean } = {}) {
       ['Read the library from anywhere', 'Every book the library has digitised is now available online. Sign in with your library ID and open a book on any phone, tablet or computer — no need to come to the desk.', 'all', 0, 16],
       ['Staff briefing — the new front desk', 'A short refresher on the kiosk sign-in and sign-out flow will be held in the library office on Wednesday at 3:00 pm. Librarians and administrators only.', 'staff', 0, 21],
     ];
-    announcements.forEach(([title, body, audience, pinned, daysAgo]) => {
-      run(`INSERT INTO announcements (title, body, audience, pinned, status, publish_at, expires_at, created_by, created_at)
+for (const [title, body, audience, pinned, daysAgo] of announcements) {
+      await run(`INSERT INTO announcements (title, body, audience, pinned, status, publish_at, expires_at, created_by, created_at)
            VALUES (?, ?, ?, ?, 'published', ?, ?, ?, ?)`,
         [title, body, audience, pinned, isoDays(daysAgo, 8), daysAgo < 5 ? null : isoDays(-30), librarian.id, isoDays(daysAgo, 8)]);
-    });
-    run(`INSERT INTO announcements (title, body, audience, pinned, status, publish_at, created_by, created_at)
+    }    await run(`INSERT INTO announcements (title, body, audience, pinned, status, publish_at, created_by, created_at)
          VALUES ('Draft: Reading challenge results', 'Draft announcement awaiting final numbers from the reading challenge.', 'students', 0, 'draft', ?, ?, ?)`,
       [isoDays(0, 8), librarian.id, isoDays(0, 8)]);
 
@@ -783,13 +771,12 @@ export function seed(options: { force?: boolean } = {}) {
       ['Homegoing', 'Yaa Gyasi', students[15].id, 'rejected'],
       ['Rich Dad Poor Dad', 'Robert Kiyosaki', students[21].id, 'pending'],
     ];
-    requests.forEach(([title, author, userId, status]) => {
-      run(`INSERT INTO book_requests (user_id, title, author, reason, status, review_notes, reviewed_by, reviewed_at, created_at)
+for (const [title, author, userId, status] of requests) {
+      await run(`INSERT INTO book_requests (user_id, title, author, reason, status, review_notes, reviewed_by, reviewed_at, created_at)
            VALUES (?, ?, ?, 'Requested for the library collection.', ?, ?, ?, ?, ?)`,
         [userId, title, author, status, status === 'pending' ? null : status === 'approved' ? 'Approved for acquisition.' : status === 'acquired' ? 'Purchased and added to stock.' : 'We already hold two copies — please borrow at the desk.',
           status === 'pending' ? null : librarian.id, status === 'pending' ? null : isoDays(between(2, 15), 12), isoDays(between(3, 45), 12)]);
-    });
-
+    }
     // Acquisitions
     const acquisitions: [string, string, number, number, string | null, string | null, number][] = [
       ['Things Fall Apart', 'purchase', 6, 35, 'EduBooks Ghana Ltd', null, 210],
@@ -801,51 +788,47 @@ export function seed(options: { force?: boolean } = {}) {
       ['Information Technology for SHS', 'purchase', 5, 45, 'Aki-Ola Depot', null, 55],
       ['The 7 Habits of Highly Effective Teens', 'donation', 1, 0, null, 'Mrs. B. Amankwah', 30],
     ];
-    acquisitions.forEach(([title, type, quantity, unitCost, supplier, donor, daysAgo]) => {
-      run(`INSERT INTO acquisitions (title_id, type, quantity, unit_cost, total_cost, supplier, donor, invoice_ref, acquired_on, notes, recorded_by, created_at)
+for (const [title, type, quantity, unitCost, supplier, donor, daysAgo] of acquisitions) {
+      await run(`INSERT INTO acquisitions (title_id, type, quantity, unit_cost, total_cost, supplier, donor, invoice_ref, acquired_on, notes, recorded_by, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [tid(title), type, quantity, unitCost, type === 'donation' ? 0 : quantity * unitCost, supplier, donor,
           type === 'purchase' ? `INV-${between(1000, 9999)}` : null, isoDays(daysAgo, 9).slice(0, 10),
           type === 'donation' ? 'Donated copy record' : 'Purchase order', librarian.id, isoDays(daysAgo, 9)]);
-    });
-
+    }
     // Completed stocktake in Fiction
-    const fictionCopies = all<any>(
+    const fictionCopies = await all<any>(
       `SELECT c.id FROM copies c JOIN titles t ON t.id = c.title_id
        WHERE c.section = 'Fiction' AND c.status = 'available' LIMIT 40`
     );
     if (fictionCopies.length > 3) {
-      const expected = scalar<number>(
+      const expected = await scalar<number>(
         `SELECT COUNT(*) FROM copies WHERE section = 'Fiction' AND status IN ('available','reserved','damaged','missing')`
       );
-      const stocktake = run(
+      const stocktake = await run(
         `INSERT INTO stocktakes (reference, location, status, expected_count, found_count, notes, started_by, started_at, completed_at)
          VALUES (?, 'Fiction', 'completed', ?, ?, 'Termly stocktake of the fiction shelves.', ?, ?, ?)`,
         [`STK-${isoDays(30, 9).slice(0, 10)}-101`, fictionCopies.length, fictionCopies.length - 2, librarian.id, isoDays(30, 9), isoDays(30, 16)]
       );
-      fictionCopies.forEach((copy, index) => {
-        if (index >= fictionCopies.length - 2) return;
-        run(`INSERT INTO stocktake_scans (stocktake_id, copy_id, condition, scanned_by, scanned_at) VALUES (?, ?, 'good', ?, ?)`,
+for (const [index, copy] of fictionCopies.entries()) {
+        if (index >= fictionCopies.length - 2) continue;
+        await run(`INSERT INTO stocktake_scans (stocktake_id, copy_id, condition, scanned_by, scanned_at) VALUES (?, ?, 'good', ?, ?)`,
           [stocktake.lastInsertRowid, copy.id, librarian.id, isoDays(30, 10)]);
-      });
-      fictionCopies.slice(-2).forEach((copy) => {
-        run(`UPDATE copies SET status = 'missing', updated_at = ? WHERE id = ?`, [isoDays(30, 16), copy.id]);
-      });
-    }
+      }for (const copy of fictionCopies.slice(-2)) {
+        await run(`UPDATE copies SET status = 'missing', updated_at = ? WHERE id = ?`, [isoDays(30, 16), copy.id]);
+      }    }
 
     // Contact messages
-    ([
+for (const [name, email, subject, message, status, daysAgo] of ([
       ['Kofi Mensah', 'kofi.mensah@example.com', 'Question about borrowing', 'Good afternoon. Can Form 1 students borrow two books at a time? I would also like to know whether the library has old examination papers for Integrated Science.', 'new', 1],
       ['Linda Owusu', 'linda.owusu@example.com', 'Donation of books', 'My family would like to donate a box of novels and textbooks. Who should we speak to about dropping them off?', 'read', 4],
-    ] as [string, string, string, string, string, number][]).forEach(([name, email, subject, message, status, daysAgo]) => {
-      run(`INSERT INTO contact_messages (name, email, subject, message, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    ] as [string, string, string, string, string, number][])) {
+      await run(`INSERT INTO contact_messages (name, email, subject, message, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
         [name, email, subject, message, status, isoDays(Number(daysAgo), 13)]);
-    });
-
+    }
     // Inboxes. Each published notice is delivered to the demo accounts that
     // should see it — the same rows a broadcast from the admin screen creates.
     // The newest notice stays unread so the bell has something to show.
-    const published = all<{ id: number; title: string; body: string; audience: string; publish_at: string }>(
+    const published = await all<{ id: number; title: string; body: string; audience: string; publish_at: string }>(
       "SELECT id, title, body, audience, publish_at FROM announcements WHERE status = 'published' ORDER BY publish_at DESC"
     );
     const demoAccounts = [admin, librarian, teacherDemo, demoStudent];
@@ -855,26 +838,30 @@ export function seed(options: { force?: boolean } = {}) {
       teachers: ['teacher'],
       staff: ['librarian', 'admin'],
     };
-    published.forEach((notice, index) => {
+for (const [index, notice] of published.entries()) {
       const roles = audienceRoles[notice.audience] ?? ['student'];
       for (const account of demoAccounts) {
         if (!roles.includes(account.role)) continue;
-        run(
+        await run(
           `INSERT INTO notifications (user_id, type, title, body, link, dedupe_key, read_at, created_at)
            VALUES (?, 'broadcast', ?, ?, NULL, ?, ?, ?)`,
           [account.id, notice.title, notice.body, `announcement:${notice.id}:${account.id}`,
             index === 0 ? null : notice.publish_at, notice.publish_at]
         );
       }
-    });
-
+    }
     // ── Front-desk visit register ──────────────────────────────────────
     // A realistic day of walk-ins: a few students still inside, the rest
     // already signed out. Book titles come from copies that exist.
-    const visitBooks = copies
-      .filter((c) => c.status === 'available')
-      .slice(0, 12)
-      .map((c) => ({ copyId: c.id, titleId: c.titleId, title: get<any>('SELECT title FROM titles WHERE id = ?', [c.titleId])?.title ?? null }));
+    const visitBooks = await Promise.all(
+      copies
+        .filter((c) => c.status === 'available')
+        .slice(0, 12)
+        .map(async (c) => {
+          const titleRow = await get<any>('SELECT title FROM titles WHERE id = ?', [c.titleId]);
+          return { copyId: c.id, titleId: c.titleId, title: titleRow?.title ?? null };
+        })
+    );
     const attendeePool = students.filter((s) => s.status === 'active');
     const ITEMS = ['School bag', 'Backpack', 'Laptop', 'Textbook', 'None'];
     const PURPOSES = ['Reading', 'Research', 'Borrowing', 'Private study', 'Revision'];
@@ -896,12 +883,12 @@ export function seed(options: { force?: boolean } = {}) {
       { user: attendeePool[14], daysAgo: 3, hour: 11, minute: 35, open: false, book: true, item: 'Textbook', purpose: 'Reading' },
       { user: attendeePool[15], daysAgo: 4, hour: 9, minute: 55, open: false, book: false, item: 'None', purpose: 'Revision' },
     ];
-    visitRows.forEach((row, index) => {
+for (const [index, row] of visitRows.entries()) {
       const book = row.book ? visitBooks[index % visitBooks.length] : null;
       const signedIn = isoDays(row.daysAgo, row.hour, row.minute);
       const minutes = 35 + (index % 5) * 20;
       const signedOut = row.open ? null : new Date(new Date(signedIn).getTime() + minutes * 60_000).toISOString();
-      run(
+      await run(
         `INSERT INTO library_visits (user_id, full_name, school_id, email, class_name, house, item_brought,
           book_taken, copy_id, title_id, purpose, notes, signed_in_by, signed_in_at, signed_out_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
@@ -910,9 +897,8 @@ export function seed(options: { force?: boolean } = {}) {
           book?.titleId ?? null, row.purpose, index % 3 === 0 ? librarian.id : admin.id,
           signedIn, signedOut, signedIn, signedOut ?? signedIn]
       );
-    });
-    // A walk-in visitor who is not a registered member.
-    run(
+    }    // A walk-in visitor who is not a registered member.
+    await run(
       `INSERT INTO library_visits (user_id, full_name, school_id, email, class_name, house, item_brought,
         book_taken, copy_id, title_id, purpose, notes, signed_in_by, signed_in_at, signed_out_at, created_at, updated_at)
        VALUES (NULL, ?, NULL, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?)`,
@@ -939,43 +925,42 @@ export function seed(options: { force?: boolean } = {}) {
       [librarian.id, 'loan.renew', 'loan', 'Renewed “Campbell Biology” for Daniel Appiah', '14', 15],
       [admin.id, 'academic.year_create', 'academic_year', 'Created academic year 2026/2027', '15', 20],
     ];
-    auditSeed.forEach(([userId, action, entity, summary, entityId, daysAgo]) => {
-      run(`INSERT INTO audit_logs (user_id, action, entity_type, entity_id, summary, details, ip, created_at)
+for (const [userId, action, entity, summary, entityId, daysAgo] of auditSeed) {
+      await run(`INSERT INTO audit_logs (user_id, action, entity_type, entity_id, summary, details, ip, created_at)
            VALUES (?, ?, ?, ?, ?, NULL, '10.10.0.12', ?)`,
         [userId, action, entity, entityId, summary, isoDays(daysAgo, 12)]);
-    });
-
-    run(`INSERT INTO settings (key, value, updated_at) VALUES ('lastBackupAt', ?, ?)
+    }
+    await run(`INSERT INTO settings (key, value, updated_at) VALUES ('lastBackupAt', ?, ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       [JSON.stringify(isoDays(1, 2)), stamp]);
 
     // The demo library opens with one account per role. Seeding builds a full
     // cast so the history looks lived-in, then everything except the four demo
     // logins is pruned (walk-in visits stay behind as anonymous records).
-    pruneToDemoAccounts();
+    await pruneToDemoAccounts();
   });
 
   // A verified backup on disk so the admin recovery screen has something real to show.
   const backupName = `libra-backup-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.db`;
   const backupPath = path.join(BACKUP_DIR, backupName);
   try {
-    run(`VACUUM INTO '${backupPath.replace(/'/g, "''")}'`);
+    await run(`VACUUM INTO '${backupPath.replace(/'/g, "''")}'`);
   } catch {
     /* backups are best-effort during seeding */
   }
 
   return {
     seeded: true,
-    users: scalar<number>('SELECT COUNT(*) FROM users'),
-    titles: scalar<number>('SELECT COUNT(*) FROM titles'),
-    copies: scalar<number>('SELECT COUNT(*) FROM copies'),
-    loans: scalar<number>('SELECT COUNT(*) FROM loans'),
-    resources: scalar<number>('SELECT COUNT(*) FROM resources'),
+    users: await scalar<number>('SELECT COUNT(*) FROM users'),
+    titles: await scalar<number>('SELECT COUNT(*) FROM titles'),
+    copies: await scalar<number>('SELECT COUNT(*) FROM copies'),
+    loans: await scalar<number>('SELECT COUNT(*) FROM loans'),
+    resources: await scalar<number>('SELECT COUNT(*) FROM resources'),
   };
 }
 
 const invokedDirectly = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
 if (invokedDirectly) {
-  const result = seed({ force: process.argv.includes('--force') });
+  const result = await seed({ force: process.argv.includes('--force') });
   console.log(result.seeded ? 'Library seeded:' : 'Library already initialised:', result);
 }

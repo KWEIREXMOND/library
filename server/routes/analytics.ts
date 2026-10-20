@@ -16,38 +16,38 @@ router.get('/analytics', requireStaff, asyncH(async (req, res) => {
   const days = Math.min(90, Math.max(7, Math.round(Number(req.query.days) || 30)));
   const since = `-${days - 1} days`;
 
-  const dayCount = (modifier: string) => scalar<number>(
+  const dayCount = async (modifier: string) => await scalar<number>(
     `SELECT COUNT(*) FROM library_visits WHERE date(signed_in_at) = date('now', ?)`, [modifier]
   );
-  const rangeCount = (where: string, params: (string | number)[] = []) => scalar<number>(
+  const rangeCount = async (where: string, params: (string | number)[] = []) => await scalar<number>(
     `SELECT COUNT(*) FROM library_visits WHERE date(signed_in_at) >= date('now', ?) ${where}`, [since, ...params]
   );
 
-  const inside = scalar<number>('SELECT COUNT(*) FROM library_visits WHERE signed_out_at IS NULL');
-  const visitsToday = dayCount('+0 days');
-  const yesterday = dayCount('-1 day');
-  const lastWeek = scalar<number>(
+  const inside = await scalar<number>('SELECT COUNT(*) FROM library_visits WHERE signed_out_at IS NULL');
+  const visitsToday = await dayCount('+0 days');
+  const yesterday = await dayCount('-1 day');
+  const lastWeek = await scalar<number>(
     `SELECT COUNT(*) FROM library_visits WHERE date(signed_in_at) >= date('now', '-6 days')`
   );
-  const rangeVisits = rangeCount('');
-  const walkIns = rangeCount('AND user_id IS NULL');
-  const uniqueVisitors = scalar<number>(
+  const rangeVisits = await rangeCount('');
+  const walkIns = await rangeCount('AND user_id IS NULL');
+  const uniqueVisitors = await scalar<number>(
     `SELECT COUNT(DISTINCT LOWER(full_name)) FROM library_visits WHERE date(signed_in_at) >= date('now', ?)`, [since]
   );
-  const repeatVisitors = scalar<number>(
+  const repeatVisitors = await scalar<number>(
     `SELECT COUNT(*) FROM (
        SELECT LOWER(full_name) AS name FROM library_visits
        WHERE date(signed_in_at) >= date('now', ?)
        GROUP BY name HAVING COUNT(*) > 1
      )`, [since]
   );
-  const averageRaw = scalar<number | null>(
+  const averageRaw = await scalar<number | null>(
     `SELECT AVG((julianday(signed_out_at) - julianday(signed_in_at)) * 1440)
      FROM library_visits
      WHERE signed_out_at IS NOT NULL AND date(signed_in_at) >= date('now', ?)`, [since]
   );
 
-  const seriesRows = all<{ day: string; count: number }>(
+  const seriesRows = await all<{ day: string; count: number }>(
     `SELECT date(signed_in_at) AS day, COUNT(*) AS count
      FROM library_visits
      WHERE date(signed_in_at) >= date('now', ?)
@@ -61,21 +61,21 @@ router.get('/analytics', requireStaff, asyncH(async (req, res) => {
     series.push({ date, label: `${day}/${month}`, count: counts.get(date) ?? 0 });
   }
 
-  const houses = all<{ house: string; count: number }>(
+  const houses = (await all<{ house: string; count: number }>(
     `SELECT COALESCE(NULLIF(house, ''), 'Not given') AS house, COUNT(*) AS count
      FROM library_visits
      WHERE date(signed_in_at) >= date('now', ?)
      GROUP BY house ORDER BY count DESC`, [since]
-  ).map((row) => ({ house: row.house, count: Number(row.count) }));
+  )).map((row) => ({ house: row.house, count: Number(row.count) }));
 
-  const purposes = all<{ purpose: string; count: number }>(
+  const purposes = (await all<{ purpose: string; count: number }>(
     `SELECT COALESCE(NULLIF(purpose, ''), 'Not given') AS purpose, COUNT(*) AS count
      FROM library_visits
      WHERE date(signed_in_at) >= date('now', ?)
      GROUP BY purpose ORDER BY count DESC LIMIT 6`, [since]
-  ).map((row) => ({ purpose: row.purpose, count: Number(row.count) }));
+  )).map((row) => ({ purpose: row.purpose, count: Number(row.count) }));
 
-  const hours = all<{ hour: string; count: number }>(
+  const hours = await all<{ hour: string; count: number }>(
     `SELECT strftime('%H', signed_in_at) AS hour, COUNT(*) AS count
      FROM library_visits
      WHERE date(signed_in_at) >= date('now', ?)
@@ -84,28 +84,28 @@ router.get('/analytics', requireStaff, asyncH(async (req, res) => {
   const hourCounts = new Map(hours.map((row) => [Number(row.hour), Number(row.count)]));
   const peakHours = Array.from({ length: 24 }, (_, hour) => ({ hour, count: hourCounts.get(hour) ?? 0 }));
 
-  const staff = all<{ name: string; count: number }>(
+  const staff = (await all<{ name: string; count: number }>(
     `SELECT u.first_name || ' ' || u.last_name AS name, COUNT(*) AS count
      FROM library_visits v JOIN users u ON u.id = v.signed_in_by
      WHERE date(v.signed_in_at) >= date('now', ?)
      GROUP BY v.signed_in_by ORDER BY count DESC LIMIT 5`, [since]
-  ).map((row) => ({ name: row.name, count: Number(row.count) }));
+  )).map((row) => ({ name: row.name, count: Number(row.count) }));
 
-  const booksTotal = scalar<number>(`SELECT COUNT(*) FROM resources WHERE kind = 'ebook'`);
-  const booksPublished = scalar<number>(`SELECT COUNT(*) FROM resources WHERE kind = 'ebook' AND status = 'approved'`);
-  const booksViews = scalar<number>(`SELECT COALESCE(SUM(view_count), 0) FROM resources WHERE kind = 'ebook'`);
-  const booksDownloads = scalar<number>(`SELECT COALESCE(SUM(download_count), 0) FROM resources WHERE kind = 'ebook'`);
-  const booksAdded = scalar<number>(
+  const booksTotal = await scalar<number>(`SELECT COUNT(*) FROM resources WHERE kind = 'ebook'`);
+  const booksPublished = await scalar<number>(`SELECT COUNT(*) FROM resources WHERE kind = 'ebook' AND status = 'approved'`);
+  const booksViews = await scalar<number>(`SELECT COALESCE(SUM(view_count), 0) FROM resources WHERE kind = 'ebook'`);
+  const booksDownloads = await scalar<number>(`SELECT COALESCE(SUM(download_count), 0) FROM resources WHERE kind = 'ebook'`);
+  const booksAdded = await scalar<number>(
     `SELECT COUNT(*) FROM resources WHERE kind = 'ebook' AND date(created_at) >= date('now', ?)`, [since]
   );
-  const topViewed = all<{ id: number; title: string; author: string | null; views: number }>(
+  const topViewed = (await all<{ id: number; title: string; author: string | null; views: number }>(
     `SELECT id, title, author, view_count AS views FROM resources
      WHERE kind = 'ebook' AND status = 'approved'
      ORDER BY view_count DESC, title LIMIT 5`
-  ).map((row) => ({ id: Number(row.id), title: row.title, author: row.author, views: Number(row.views) }));
+  )).map((row) => ({ id: Number(row.id), title: row.title, author: row.author, views: Number(row.views) }));
 
   // Books are typed as free text at sign-out, so tally the titles in JavaScript.
-  const takenRows = all<{ book_taken: string }>(
+  const takenRows = await all<{ book_taken: string }>(
     `SELECT book_taken FROM library_visits
      WHERE book_taken IS NOT NULL AND book_taken <> '' AND date(signed_in_at) >= date('now', ?)`, [since]
   );
@@ -122,10 +122,10 @@ router.get('/analytics', requireStaff, asyncH(async (req, res) => {
     .slice(0, 5)
     .map(([title, count]) => ({ title, count }));
 
-  const members = all<{ role: string; count: number }>('SELECT role, COUNT(*) AS count FROM users GROUP BY role')
+  const members = (await all<{ role: string; count: number }>('SELECT role, COUNT(*) AS count FROM users GROUP BY role'))
     .map((row) => ({ role: row.role, count: Number(row.count) }));
   const memberCount = (role: string) => members.find((row) => row.role === role)?.count ?? 0;
-  const newMembers = scalar<number>(
+  const newMembers = await scalar<number>(
     `SELECT COUNT(*) FROM users WHERE date(created_at) >= date('now', ?)`, [since]
   );
 

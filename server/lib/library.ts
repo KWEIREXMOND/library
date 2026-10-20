@@ -25,7 +25,7 @@ export type TitleFilters = {
   offset?: number;
 };
 
-export function searchTitles(filters: TitleFilters) {
+export async function searchTitles(filters: TitleFilters) {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (!filters.includeArchived) where.push('t.archived_at IS NULL');
@@ -82,26 +82,26 @@ export function searchTitles(filters: TitleFilters) {
   }
   const limit = Math.min(100, Math.max(1, filters.limit ?? 12));
   const offset = Math.max(0, filters.offset ?? 0);
-  const rows = all<any>(
+  const rows = await all<any>(
     `SELECT * FROM (${inner}) x ${outerWhere.length ? `WHERE ${outerWhere.join(' AND ')}` : ''} ORDER BY ${order} LIMIT ? OFFSET ?`,
     [...rowParams, limit, offset]
   );
-  const total = scalar<number>(
+  const total = await scalar<number>(
     `SELECT COUNT(*) FROM (${inner}) x ${outerWhere.length ? `WHERE ${outerWhere.join(' AND ')}` : ''}`,
     filterParams
   );
   return { rows: rows.map(mapTitle), total };
 }
 
-export function getTitleDetail(id: number) {
-  const row = get<any>(`${TITLE_SELECT} WHERE t.id = ?`, [id]);
+export async function getTitleDetail(id: number) {
+  const row = await get<any>(`${TITLE_SELECT} WHERE t.id = ?`, [id]);
   if (!row) throw notFound('That book could not be found.');
   const title = mapTitle(row);
-  const copies = all<any>(
+  const copies = (await all<any>(
     `SELECT c.*, t.title, t.author, t.cover_color FROM copies c JOIN titles t ON t.id = c.title_id
      WHERE c.title_id = ? ORDER BY c.status = 'available' DESC, c.barcode ASC`,
     [id]
-  ).map((c) => ({
+  )).map((c) => ({
     id: c.id,
     barcode: c.barcode,
     accessionNo: c.accession_no,
@@ -113,15 +113,15 @@ export function getTitleDetail(id: number) {
     acquisition: c.acquisition,
     acquiredOn: c.acquired_on,
   }));
-  const relatedResources = all<any>(
+  const relatedResources = await all<any>(
     `SELECT * FROM resources WHERE status = 'approved' AND subject_id = ? LIMIT 4`,
     [row.subject_id ?? -1]
   );
-  const similar = all<any>(
+  const similar = (await all<any>(
     `${TITLE_SELECT} WHERE t.archived_at IS NULL AND t.id <> ? AND (t.category_id = ? OR t.subject_id = ?)
      ORDER BY (SELECT COUNT(*) FROM loans l JOIN copies cp ON cp.id = l.copy_id WHERE cp.title_id = t.id) DESC LIMIT 4`,
     [id, row.category_id ?? -1, row.subject_id ?? -1]
-  ).map(mapTitle);
+  )).map(mapTitle);
   return { ...title!, copies, relatedResourceIds: relatedResources.map((r) => r.id), similar };
 }
 
@@ -138,15 +138,15 @@ export type IssueInput = {
 
 export function issueLoan(input: IssueInput) {
   const settings = getSettings();
-  return tx(() => {
-    const copy = get<any>(
+  return tx(async () => {
+    const copy = await get<any>(
       `SELECT c.*, t.title, t.archived_at FROM copies c JOIN titles t ON t.id = c.title_id WHERE c.id = ?`,
       [input.copyId]
     );
     if (!copy) throw notFound('That copy could not be found.');
     if (copy.archived_at) throw conflict('This title has been archived and cannot be issued.');
 
-    const user = get<any>('SELECT * FROM users WHERE id = ?', [input.userId]);
+    const user = await get<any>('SELECT * FROM users WHERE id = ?', [input.userId]);
     if (!user) throw notFound('That borrower could not be found.');
     if (user.status !== 'active') throw conflict(`This account is ${user.status} and cannot borrow books.`);
 
@@ -154,7 +154,7 @@ export function issueLoan(input: IssueInput) {
     if (['lost', 'damaged', 'retired', 'missing'].includes(copy.status))
       throw conflict(`This copy is marked “${copy.status}” and cannot be issued.`);
     if (copy.status === 'reserved') {
-      const held = get<any>(
+      const held = await get<any>(
         `SELECT r.* FROM reservations r WHERE r.title_id = ? AND r.user_id = ? AND r.status = 'ready'`,
         [copy.title_id, user.id]
       );
@@ -165,12 +165,12 @@ export function issueLoan(input: IssueInput) {
       (user.role === 'student' ? settings.loanDaysStudent : settings.loanDaysTeacher);
     if (!Number.isFinite(loanDays) || loanDays < 1 || loanDays > 365) throw conflict('Loan period must be between 1 and 365 days.');
 
-    const activeCount = scalar<number>(`SELECT COUNT(*) FROM loans WHERE user_id = ? AND status = 'active'`, [user.id]);
+    const activeCount = await scalar<number>(`SELECT COUNT(*) FROM loans WHERE user_id = ? AND status = 'active'`, [user.id]);
     const limit = user.role === 'student' ? settings.borrowLimitStudent : settings.borrowLimitTeacher;
     if (activeCount >= limit && !input.overrideLimit) {
       throw conflict(`${user.first_name} already has ${activeCount} book${activeCount === 1 ? '' : 's'} on loan (limit ${limit}).`, { code: 'limit' });
     }
-    const sameTitle = scalar<number>(
+    const sameTitle = await scalar<number>(
       `SELECT COUNT(*) FROM loans l JOIN copies c ON c.id = l.copy_id
        WHERE l.user_id = ? AND l.status = 'active' AND c.title_id = ?`,
       [user.id, copy.title_id]
@@ -178,7 +178,7 @@ export function issueLoan(input: IssueInput) {
     if (sameTitle > 0 && !input.overrideLimit)
       throw conflict('This borrower already has a copy of this title on loan.', { code: 'duplicate-title' });
 
-    const balance = outstandingBalance(user.id);
+    const balance = await outstandingBalance(user.id);
     if (settings.fineBlockThreshold > 0 && balance > settings.fineBlockThreshold && !input.overrideRestriction) {
       throw conflict(
         `${user.first_name} has outstanding charges of ${settings.currency} ${balance.toFixed(2)}. Settle the balance or override to issue this book.`,
@@ -189,25 +189,25 @@ export function issueLoan(input: IssueInput) {
     const now = new Date();
     const due = addDays(now, loanDays);
     const stamp = now.toISOString();
-    const loan = run(
+    const loan = await run(
       `INSERT INTO loans (copy_id, user_id, issued_by, issue_date, due_date, status, notes, created_at)
        VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
       [copy.id, user.id, input.actorId, stamp, due.toISOString(), input.notes ?? null, stamp]
     );
-    run(`UPDATE copies SET status = 'borrowed', updated_at = ? WHERE id = ?`, [stamp, copy.id]);
-    run(`INSERT INTO loan_events (loan_id, type, actor_id, notes, created_at) VALUES (?, 'issued', ?, ?, ?)`,
+    await run(`UPDATE copies SET status = 'borrowed', updated_at = ? WHERE id = ?`, [stamp, copy.id]);
+    await run(`INSERT INTO loan_events (loan_id, type, actor_id, notes, created_at) VALUES (?, 'issued', ?, ?, ?)`,
       [loan.lastInsertRowid, input.actorId, input.notes ?? null, stamp]);
 
-    const ready = get<any>(
+    const ready = await get<any>(
       `SELECT id FROM reservations WHERE title_id = ? AND user_id = ? AND status IN ('ready','waiting')`,
       [copy.title_id, user.id]
     );
     if (ready) {
-      run(`UPDATE reservations SET status = 'fulfilled', resolved_at = ? WHERE id = ?`, [stamp, ready.id]);
-      releaseHeldCopy(copy.title_id);
+      await run(`UPDATE reservations SET status = 'fulfilled', resolved_at = ? WHERE id = ?`, [stamp, ready.id]);
+      await releaseHeldCopy(copy.title_id);
     }
 
-    notify({
+    await notify({
       userId: user.id,
       type: 'loan_issued',
       title: 'Book issued',
@@ -215,7 +215,7 @@ export function issueLoan(input: IssueInput) {
       link: '/app/borrowed',
       dedupeKey: `loan-${loan.lastInsertRowid}`,
     });
-    audit({
+    await audit({
       userId: input.actorId,
       action: 'loan.issue',
       entityType: 'loan',
@@ -223,7 +223,7 @@ export function issueLoan(input: IssueInput) {
       summary: `Issued “${copy.title}” (${copy.barcode}) to ${user.first_name} ${user.last_name}`,
     });
 
-    const full = get<any>(`${LOAN_SELECT} WHERE l.id = ?`, [loan.lastInsertRowid]);
+    const full = await get<any>(`${LOAN_SELECT} WHERE l.id = ?`, [loan.lastInsertRowid]);
     return mapLoan(full) as any;
   });
 }
@@ -240,8 +240,8 @@ export type ReturnInput = {
 
 export function returnLoan(input: ReturnInput) {
   const settings = getSettings();
-  return tx(() => {
-    const loan = get<any>(`${LOAN_SELECT} WHERE l.id = ?`, [input.loanId]);
+  return tx(async () => {
+    const loan = await get<any>(`${LOAN_SELECT} WHERE l.id = ?`, [input.loanId]);
     if (!loan) throw notFound('That loan could not be found.');
     if (loan.status !== 'active') throw conflict('This loan has already been closed.');
 
@@ -250,7 +250,7 @@ export function returnLoan(input: ReturnInput) {
     const charges: { id: number; type: string; amount: number }[] = [];
 
     if (fine.amount > 0) {
-      const c = run(
+      const c = await run(
         `INSERT INTO charges (user_id, loan_id, type, amount, description, status, created_by, created_at)
          VALUES (?, ?, 'overdue', ?, ?, 'outstanding', ?, ?)`,
         [
@@ -267,26 +267,26 @@ export function returnLoan(input: ReturnInput) {
 
     if (input.lost) {
       const cost = input.replacementCost ?? settings.defaultReplacementCost;
-      const c = run(
+      const c = await run(
         `INSERT INTO charges (user_id, loan_id, type, amount, description, status, created_by, created_at)
          VALUES (?, ?, 'lost', ?, ?, 'outstanding', ?, ?)`,
         [loan.user_id, loan.id, cost, `Replacement cost — “${loan.title}” (${loan.barcode})`, input.actorId, stamp]
       );
       charges.push({ id: c.lastInsertRowid, type: 'lost', amount: cost });
-      run(`UPDATE copies SET status = 'lost', updated_at = ? WHERE id = ?`, [stamp, loan.copy_id]);
-      run(`UPDATE loans SET status = 'lost', return_date = ?, returned_by = ?, notes = COALESCE(?, notes) WHERE id = ?`,
+      await run(`UPDATE copies SET status = 'lost', updated_at = ? WHERE id = ?`, [stamp, loan.copy_id]);
+      await run(`UPDATE loans SET status = 'lost', return_date = ?, returned_by = ?, notes = COALESCE(?, notes) WHERE id = ?`,
         [stamp, input.actorId, input.notes ?? null, loan.id]);
     } else {
       const newCondition = input.condition && ['new', 'good', 'fair', 'poor'].includes(input.condition) ? input.condition : 'good';
       const damaged = input.condition === 'damaged';
-      run(
+      await run(
         `UPDATE copies SET status = ?, condition = ?, updated_at = ? WHERE id = ?`,
         [damaged ? 'damaged' : 'available', damaged ? 'poor' : newCondition, stamp, loan.copy_id]
       );
-      run(`UPDATE loans SET status = 'returned', return_date = ?, returned_by = ?, notes = COALESCE(?, notes) WHERE id = ?`,
+      await run(`UPDATE loans SET status = 'returned', return_date = ?, returned_by = ?, notes = COALESCE(?, notes) WHERE id = ?`,
         [stamp, input.actorId, input.notes ?? null, loan.id]);
       if (input.damageCharge && input.damageCharge > 0) {
-        const c = run(
+        const c = await run(
           `INSERT INTO charges (user_id, loan_id, type, amount, description, status, created_by, created_at)
            VALUES (?, ?, 'damage', ?, ?, 'outstanding', ?, ?)`,
           [loan.user_id, loan.id, input.damageCharge, `Damage charge — “${loan.title}” (${loan.barcode})`, input.actorId, stamp]
@@ -295,11 +295,11 @@ export function returnLoan(input: ReturnInput) {
       }
     }
 
-    run(`INSERT INTO loan_events (loan_id, type, actor_id, notes, created_at) VALUES (?, ?, ?, ?, ?)`,
+    await run(`INSERT INTO loan_events (loan_id, type, actor_id, notes, created_at) VALUES (?, ?, ?, ?, ?)`,
       [loan.id, input.lost ? 'lost' : 'returned', input.actorId, input.notes ?? null, stamp]);
 
     const total = charges.reduce((sum, c) => sum + c.amount, 0);
-    notify({
+    await notify({
       userId: loan.user_id,
       type: 'loan_returned',
       title: input.lost ? 'Book recorded as lost' : 'Book returned',
@@ -310,9 +310,9 @@ export function returnLoan(input: ReturnInput) {
       dedupeKey: `return-${loan.id}`,
     });
 
-    if (!input.lost) advanceQueue(loan.title_id);
+    if (!input.lost) await advanceQueue(loan.title_id);
 
-    audit({
+    await audit({
       userId: input.actorId,
       action: input.lost ? 'loan.lost' : 'loan.return',
       entityType: 'loan',
@@ -321,15 +321,15 @@ export function returnLoan(input: ReturnInput) {
       details: { charges },
     });
 
-    const updated = get<any>(`${LOAN_SELECT} WHERE l.id = ?`, [loan.id]);
+    const updated = await get<any>(`${LOAN_SELECT} WHERE l.id = ?`, [loan.id]);
     return { loan: mapLoan(updated, { withFine: false }), charges, fine: fine.amount };
   });
 }
 
 export function renewLoan(loanId: number, actorId: number, actorRole: string, userId: number) {
   const settings = getSettings();
-  return tx(() => {
-    const loan = get<any>(`${LOAN_SELECT} WHERE l.id = ?`, [loanId]);
+  return tx(async () => {
+    const loan = await get<any>(`${LOAN_SELECT} WHERE l.id = ?`, [loanId]);
     if (!loan) throw notFound('That loan could not be found.');
     if (loan.user_id !== userId && !['librarian', 'admin'].includes(actorRole))
       throw new HttpError(403, 'You can only renew your own loans.');
@@ -337,7 +337,7 @@ export function renewLoan(loanId: number, actorId: number, actorRole: string, us
     if (overdueDays(loan.due_date) > 0) throw conflict('Overdue books cannot be renewed — please return the book first.');
     if (loan.renewal_count >= settings.renewalLimit)
       throw conflict(`This loan has reached the renewal limit (${settings.renewalLimit}).`);
-    const waiting = scalar<number>(
+    const waiting = await scalar<number>(
       `SELECT COUNT(*) FROM reservations WHERE title_id = ? AND status IN ('waiting','ready') AND user_id <> ?`,
       [loan.title_id, loan.user_id]
     );
@@ -345,10 +345,10 @@ export function renewLoan(loanId: number, actorId: number, actorRole: string, us
 
     const base = new Date(Math.max(Date.now(), new Date(loan.due_date).getTime()));
     const newDue = addDays(base, settings.renewalDays);
-    run(`UPDATE loans SET due_date = ?, renewal_count = renewal_count + 1 WHERE id = ?`, [newDue.toISOString(), loan.id]);
-    run(`INSERT INTO loan_events (loan_id, type, actor_id, notes, created_at) VALUES (?, 'renewed', ?, ?, ?)`,
+    await run(`UPDATE loans SET due_date = ?, renewal_count = renewal_count + 1 WHERE id = ?`, [newDue.toISOString(), loan.id]);
+    await run(`INSERT INTO loan_events (loan_id, type, actor_id, notes, created_at) VALUES (?, 'renewed', ?, ?, ?)`,
       [loan.id, actorId, `Extended to ${newDue.toISOString().slice(0, 10)}`, nowIso()]);
-    notify({
+    await notify({
       userId: loan.user_id,
       type: 'renewal_approved',
       title: 'Renewal approved',
@@ -356,20 +356,20 @@ export function renewLoan(loanId: number, actorId: number, actorRole: string, us
       link: '/app/borrowed',
       dedupeKey: `renew-${loan.id}-${loan.renewal_count + 1}`,
     });
-    audit({
+    await audit({
       userId: actorId,
       action: 'loan.renew',
       entityType: 'loan',
       entityId: loan.id,
       summary: `Renewed “${loan.title}” for ${loan.borrower_name}`,
     });
-    return mapLoan(get<any>(`${LOAN_SELECT} WHERE l.id = ?`, [loan.id]));
+    return mapLoan(await get<any>(`${LOAN_SELECT} WHERE l.id = ?`, [loan.id]));
   });
 }
 
 // ── Reservations ──────────────────────────────────────────────────────
-export function queuePosition(titleId: number, reservationId: number) {
-  const row = get<{ pos: number }>(
+export async function queuePosition(titleId: number, reservationId: number) {
+  const row = await get<{ pos: number }>(
     `SELECT COUNT(*) + 1 AS pos FROM reservations
      WHERE title_id = ? AND status = 'waiting' AND (created_at < (SELECT created_at FROM reservations WHERE id = ?)
      OR (created_at = (SELECT created_at FROM reservations WHERE id = ?) AND id < ?))`,
@@ -380,25 +380,25 @@ export function queuePosition(titleId: number, reservationId: number) {
 
 export function createReservation(userId: number, titleId: number, actorId?: number) {
   const settings = getSettings();
-  return tx(() => {
-    const title = get<any>('SELECT * FROM titles WHERE id = ?', [titleId]);
+  return tx(async () => {
+    const title = await get<any>('SELECT * FROM titles WHERE id = ?', [titleId]);
     if (!title || title.archived_at) throw notFound('That book could not be found.');
-    const user = get<any>('SELECT * FROM users WHERE id = ?', [userId]);
+    const user = await get<any>('SELECT * FROM users WHERE id = ?', [userId]);
     if (!user) throw notFound('Borrower not found.');
     if (user.status !== 'active') throw conflict('Only active accounts can place reservations.');
     if (user.role === 'student' && !settings.allowStudentReservations)
       throw conflict('Student reservations are currently disabled. Please ask the librarian for help.');
 
-    const available = scalar<number>(`SELECT COUNT(*) FROM copies WHERE title_id = ? AND status = 'available'`, [titleId]);
+    const available = await scalar<number>(`SELECT COUNT(*) FROM copies WHERE title_id = ? AND status = 'available'`, [titleId]);
     if (available > 0) throw conflict('A copy is already available — you can borrow it from the library desk.', { code: 'available' });
 
-    const existing = get<any>(
+    const existing = await get<any>(
       `SELECT id FROM reservations WHERE title_id = ? AND user_id = ? AND status IN ('waiting','ready')`,
       [titleId, userId]
     );
     if (existing) throw conflict('You already have an active reservation for this title.');
 
-    const activeCount = scalar<number>(
+    const activeCount = await scalar<number>(
       `SELECT COUNT(*) FROM reservations WHERE user_id = ? AND status IN ('waiting','ready')`,
       [userId]
     );
@@ -406,13 +406,13 @@ export function createReservation(userId: number, titleId: number, actorId?: num
       throw conflict(`You can hold a maximum of ${settings.maxReservations} reservations at a time.`);
 
     const stamp = nowIso();
-    const res = run(
+    const res = await run(
       `INSERT INTO reservations (title_id, user_id, status, queue_position, created_at) VALUES (?, ?, 'waiting', ?, ?)`,
       [titleId, userId, activeCount + 1, stamp]
     );
-    const position = queuePosition(titleId, res.lastInsertRowid);
-    run(`UPDATE reservations SET queue_position = ? WHERE id = ?`, [position, res.lastInsertRowid]);
-    notify({
+    const position = await queuePosition(titleId, res.lastInsertRowid);
+    await run(`UPDATE reservations SET queue_position = ? WHERE id = ?`, [position, res.lastInsertRowid]);
+    await notify({
       userId,
       type: 'reservation_created',
       title: 'Reservation placed',
@@ -420,15 +420,15 @@ export function createReservation(userId: number, titleId: number, actorId?: num
       link: '/app/reservations',
       dedupeKey: `res-created-${res.lastInsertRowid}`,
     });
-    audit({
+    await audit({
       userId: actorId ?? userId,
       action: 'reservation.create',
       entityType: 'reservation',
       entityId: res.lastInsertRowid,
       summary: `Reserved “${title.title}” for ${user.first_name} ${user.last_name}`,
     });
-    advanceQueue(titleId);
-    return get<any>(
+    await advanceQueue(titleId);
+    return await get<any>(
       `SELECT r.*, t.title, t.author, t.cover_color, ? AS position FROM reservations r JOIN titles t ON t.id = r.title_id WHERE r.id = ?`,
       [position, res.lastInsertRowid]
     );
@@ -436,21 +436,21 @@ export function createReservation(userId: number, titleId: number, actorId?: num
 }
 
 export function cancelReservation(reservationId: number, userId: number, isStaffUser: boolean, reason?: string) {
-  return tx(() => {
-    const res = get<any>(
+  return tx(async () => {
+    const res = await get<any>(
       `SELECT r.*, t.title FROM reservations r JOIN titles t ON t.id = r.title_id WHERE r.id = ?`,
       [reservationId]
     );
     if (!res) throw notFound('That reservation could not be found.');
     if (res.user_id !== userId && !isStaffUser) throw new HttpError(403, 'You can only cancel your own reservations.');
     if (!['waiting', 'ready'].includes(res.status)) throw conflict('This reservation is no longer active.');
-    run(`UPDATE reservations SET status = 'cancelled', resolved_at = ?, cancel_reason = ? WHERE id = ?`,
+    await run(`UPDATE reservations SET status = 'cancelled', resolved_at = ?, cancel_reason = ? WHERE id = ?`,
       [nowIso(), reason ?? null, reservationId]);
     if (res.status === 'ready') {
-      releaseHeldCopy(res.title_id);
-      advanceQueue(res.title_id);
+      await releaseHeldCopy(res.title_id);
+      await advanceQueue(res.title_id);
     }
-    audit({
+    await audit({
       userId,
       action: 'reservation.cancel',
       entityType: 'reservation',
@@ -462,14 +462,14 @@ export function cancelReservation(reservationId: number, userId: number, isStaff
 }
 
 // ── Recommendations ───────────────────────────────────────────────────
-export function recommendationsFor(userId: number, limit = 6) {
+export async function recommendationsFor(userId: number, limit = 6) {
   const borrowed = new Set(
-    all<{ title_id: number }>(
+    (await all<{ title_id: number }>(
       `SELECT DISTINCT c.title_id FROM loans l JOIN copies c ON c.id = l.copy_id WHERE l.user_id = ?`,
       [userId]
-    ).map((r) => r.title_id)
+    )).map((r) => r.title_id)
   );
-  const interests = all<{ subject_id: number | null; category_id: number | null }>(
+  const interests = await all<{ subject_id: number | null; category_id: number | null }>(
     `SELECT DISTINCT t.subject_id, t.category_id FROM loans l
      JOIN copies c ON c.id = l.copy_id JOIN titles t ON t.id = c.title_id WHERE l.user_id = ?
      UNION SELECT t.subject_id, t.category_id FROM saved_books s JOIN titles t ON t.id = s.title_id WHERE s.user_id = ?`,
@@ -477,7 +477,7 @@ export function recommendationsFor(userId: number, limit = 6) {
   );
   const subjectIds = interests.map((i) => i.subject_id).filter(Boolean);
   const categoryIds = interests.map((i) => i.category_id).filter(Boolean);
-  const rows = all<any>(
+  const rows = (await all<any>(
     `${TITLE_SELECT} WHERE t.archived_at IS NULL ORDER BY
       (CASE WHEN t.subject_id IN (${subjectIds.map(() => '?').join(',') || 'NULL'}) THEN 2 ELSE 0 END) +
       (CASE WHEN t.category_id IN (${categoryIds.map(() => '?').join(',') || 'NULL'}) THEN 1 ELSE 0 END) +
@@ -485,45 +485,45 @@ export function recommendationsFor(userId: number, limit = 6) {
       (SELECT COUNT(*) FROM loans l JOIN copies cp ON cp.id = l.copy_id WHERE cp.title_id = t.id) DESC
      LIMIT ?`,
     [...subjectIds, ...categoryIds, limit + borrowed.size]
-  ).map(mapTitle);
+  )).map(mapTitle);
   return rows.filter((r) => r && !borrowed.has(r.id)).slice(0, limit);
 }
 
 // ── Staff dashboard figures ───────────────────────────────────────────
-export function staffStats() {
-  const totalCopies = scalar<number>(`SELECT COUNT(*) FROM copies WHERE status <> 'retired'`);
-  const available = scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'available'`);
-  const borrowed = scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'borrowed'`);
-  const reservedHolds = scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'reserved'`);
-  const lost = scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'lost'`);
-  const damaged = scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'damaged'`);
-  const missing = scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'missing'`);
-  const titles = scalar<number>(`SELECT COUNT(*) FROM titles WHERE archived_at IS NULL`);
-  const activeLoans = scalar<number>(`SELECT COUNT(*) FROM loans WHERE status = 'active'`);
-  const overdue = scalar<number>(
+export async function staffStats() {
+  const totalCopies = await scalar<number>(`SELECT COUNT(*) FROM copies WHERE status <> 'retired'`);
+  const available = await scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'available'`);
+  const borrowed = await scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'borrowed'`);
+  const reservedHolds = await scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'reserved'`);
+  const lost = await scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'lost'`);
+  const damaged = await scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'damaged'`);
+  const missing = await scalar<number>(`SELECT COUNT(*) FROM copies WHERE status = 'missing'`);
+  const titles = await scalar<number>(`SELECT COUNT(*) FROM titles WHERE archived_at IS NULL`);
+  const activeLoans = await scalar<number>(`SELECT COUNT(*) FROM loans WHERE status = 'active'`);
+  const overdue = await scalar<number>(
     `SELECT COUNT(*) FROM loans WHERE status = 'active' AND date(due_date) < date('now')`
   );
-  const dueSoon = scalar<number>(
+  const dueSoon = await scalar<number>(
     `SELECT COUNT(*) FROM loans WHERE status = 'active' AND date(due_date) BETWEEN date('now') AND date('now','+3 day')`
   );
-  const waiting = scalar<number>(`SELECT COUNT(*) FROM reservations WHERE status = 'waiting'`);
-  const ready = scalar<number>(`SELECT COUNT(*) FROM reservations WHERE status = 'ready'`);
-  const students = scalar<number>(`SELECT COUNT(*) FROM users WHERE role = 'student' AND status = 'active'`);
-  const teachers = scalar<number>(`SELECT COUNT(*) FROM users WHERE role = 'teacher' AND status = 'active'`);
-  const outstanding = scalar<number>(
+  const waiting = await scalar<number>(`SELECT COUNT(*) FROM reservations WHERE status = 'waiting'`);
+  const ready = await scalar<number>(`SELECT COUNT(*) FROM reservations WHERE status = 'ready'`);
+  const students = await scalar<number>(`SELECT COUNT(*) FROM users WHERE role = 'student' AND status = 'active'`);
+  const teachers = await scalar<number>(`SELECT COUNT(*) FROM users WHERE role = 'teacher' AND status = 'active'`);
+  const outstanding = await scalar<number>(
     `SELECT COALESCE(SUM(amount - paid_amount - waived_amount), 0) FROM charges WHERE status IN ('outstanding','partial')`
   );
-  const collected = scalar<number>(
+  const collected = await scalar<number>(
     `SELECT COALESCE(SUM(amount), 0) FROM payments WHERE method <> 'waiver' AND date(created_at) >= date('now','start of month')`
   );
-  const loansThisMonth = scalar<number>(
+  const loansThisMonth = await scalar<number>(
     `SELECT COUNT(*) FROM loans WHERE date(issue_date) >= date('now','start of month')`
   );
-  const loansLastMonth = scalar<number>(
+  const loansLastMonth = await scalar<number>(
     `SELECT COUNT(*) FROM loans WHERE date(issue_date) >= date('now','start of month','-1 month') AND date(issue_date) < date('now','start of month')`
   );
 
-  const monthly = all<any>(
+  const monthly = await all<any>(
     `WITH months(month) AS (
        SELECT strftime('%Y-%m', 'now') UNION SELECT strftime('%Y-%m','now','-1 month')
        UNION SELECT strftime('%Y-%m','now','-2 month') UNION SELECT strftime('%Y-%m','now','-3 month')
@@ -534,39 +534,39 @@ export function staffStats() {
      FROM months m ORDER BY m.month ASC`
   );
 
-  const popular = all<any>(
+  const popular = await all<any>(
     `SELECT t.id, t.title, t.author, t.cover_color, COUNT(l.id) AS loans
      FROM titles t JOIN copies c ON c.title_id = t.id JOIN loans l ON l.copy_id = c.id
      WHERE t.archived_at IS NULL GROUP BY t.id ORDER BY loans DESC, t.title ASC LIMIT 5`
   );
-  const popularSubjects = all<any>(
+  const popularSubjects = await all<any>(
     `SELECT s.name, COUNT(l.id) AS loans FROM subjects s
      JOIN titles t ON t.subject_id = s.id JOIN copies c ON c.title_id = t.id JOIN loans l ON l.copy_id = c.id
      GROUP BY s.id ORDER BY loans DESC LIMIT 5`
   );
-  const recent = all<any>(`${LOAN_SELECT} ORDER BY l.created_at DESC LIMIT 6`).map((r) => mapLoan(r));
-  const overdueLoans = all<any>(
+  const recent = (await all<any>(`${LOAN_SELECT} ORDER BY l.created_at DESC LIMIT 6`)).map((r) => mapLoan(r));
+  const overdueLoans = (await all<any>(
     `SELECT * FROM (${LOAN_SELECT}) x WHERE x.status = 'active' AND date(x.due_date) < date('now')
      ORDER BY x.due_date ASC LIMIT 5`
-  ).map((r) => mapLoan(r));
+  )).map((r) => mapLoan(r));
   const visits = {
-    inside: scalar<number>('SELECT COUNT(*) FROM library_visits WHERE signed_out_at IS NULL'),
-    today: scalar<number>("SELECT COUNT(*) FROM library_visits WHERE date(signed_in_at) = date('now')"),
-    booksTakenToday: scalar<number>(
+    inside: await scalar<number>('SELECT COUNT(*) FROM library_visits WHERE signed_out_at IS NULL'),
+    today: await scalar<number>("SELECT COUNT(*) FROM library_visits WHERE date(signed_in_at) = date('now')"),
+    booksTakenToday: await scalar<number>(
       "SELECT COUNT(*) FROM library_visits WHERE date(signed_in_at) = date('now') AND book_taken IS NOT NULL AND book_taken <> ''"
     ),
   };
 
   const alerts = {
-    poorCondition: scalar<number>(`SELECT COUNT(*) FROM copies WHERE condition = 'poor' AND status = 'available'`),
-    noCopies: scalar<number>(
+    poorCondition: await scalar<number>(`SELECT COUNT(*) FROM copies WHERE condition = 'poor' AND status = 'available'`),
+    noCopies: await scalar<number>(
       `SELECT COUNT(*) FROM titles t WHERE t.archived_at IS NULL AND NOT EXISTS (SELECT 1 FROM copies c WHERE c.title_id = t.id AND c.status <> 'retired')`
     ),
-    longOverdue: scalar<number>(
+    longOverdue: await scalar<number>(
       `SELECT COUNT(*) FROM loans WHERE status = 'active' AND date(due_date) < date('now','-14 day')`
     ),
-    pendingRequests: scalar<number>(`SELECT COUNT(*) FROM book_requests WHERE status = 'pending'`),
-    pendingResources: scalar<number>(`SELECT COUNT(*) FROM resources WHERE status = 'pending'`),
+    pendingRequests: await scalar<number>(`SELECT COUNT(*) FROM book_requests WHERE status = 'pending'`),
+    pendingResources: await scalar<number>(`SELECT COUNT(*) FROM resources WHERE status = 'pending'`),
   };
 
   return {
@@ -580,28 +580,28 @@ export function staffStats() {
   };
 }
 
-export function studentStats(userId: number) {
-  const active = all<any>(`${LOAN_SELECT} WHERE l.user_id = ? AND l.status = 'active' ORDER BY l.due_date ASC`, [userId])
+export async function studentStats(userId: number) {
+  const active = (await all<any>(`${LOAN_SELECT} WHERE l.user_id = ? AND l.status = 'active' ORDER BY l.due_date ASC`, [userId]))
     .map((r) => mapLoan(r));
   const dueSoon = active.filter((l) => l && l.overdueDays === 0 && daysBetween(l.dueDate) >= -3);
   const overdue = active.filter((l) => l && l.overdueDays > 0);
-  const reservations = all<any>(
+  const reservations = (await all<any>(
     `SELECT r.*, t.title, t.author, t.cover_color,
        (SELECT COUNT(*) FROM reservations r2 WHERE r2.title_id = r.title_id AND r2.status = 'waiting' AND r2.created_at < r.created_at) + 1 AS position,
        (SELECT COUNT(*) FROM copies c WHERE c.title_id = r.title_id AND c.status = 'available') AS copies_available
      FROM reservations r JOIN titles t ON t.id = r.title_id
      WHERE r.user_id = ? AND r.status IN ('waiting','ready') ORDER BY r.created_at ASC`,
     [userId]
-  ).map(mapReservation);
-  const history = all<any>(`${LOAN_SELECT} WHERE l.user_id = ? AND l.status <> 'active' ORDER BY l.return_date DESC LIMIT 8`, [userId])
+  )).map(mapReservation);
+  const history = (await all<any>(`${LOAN_SELECT} WHERE l.user_id = ? AND l.status <> 'active' ORDER BY l.return_date DESC LIMIT 8`, [userId]))
     .map((r) => mapLoan(r, { withFine: false }));
-  const saved = all<any>(
+  const saved = (await all<any>(
     `SELECT x.*, s.status AS saved_status, s.progress, s.note, s.updated_at AS saved_at
      FROM saved_books s JOIN (${TITLE_SELECT}) x ON x.id = s.title_id
      WHERE s.user_id = ? ORDER BY s.updated_at DESC`,
     [userId]
-  ).map((r) => ({ ...mapTitle(r), savedStatus: r.saved_status, progress: r.progress, note: r.note, savedAt: r.saved_at }));
-  const balance = outstandingBalance(userId);
+  )).map((r) => ({ ...mapTitle(r), savedStatus: r.saved_status, progress: r.progress, note: r.note, savedAt: r.saved_at }));
+  const balance = await outstandingBalance(userId);
   return {
     activeLoans: active,
     dueSoon,
@@ -610,7 +610,7 @@ export function studentStats(userId: number) {
     history,
     saved,
     balance,
-    totalBorrowed: scalar<number>('SELECT COUNT(*) FROM loans WHERE user_id = ?', [userId]),
-    booksRead: scalar<number>(`SELECT COUNT(*) FROM loans WHERE user_id = ? AND status IN ('returned','lost')`, [userId]),
+    totalBorrowed: await scalar<number>('SELECT COUNT(*) FROM loans WHERE user_id = ?', [userId]),
+    booksRead: await scalar<number>(`SELECT COUNT(*) FROM loans WHERE user_id = ? AND status IN ('returned','lost')`, [userId]),
   };
 }

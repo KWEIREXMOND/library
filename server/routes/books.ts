@@ -119,15 +119,15 @@ router.get('/books', asyncH(async (req, res) => {
     : String(req.query.sort) === 'popular' ? 'r.view_count DESC, r.title'
     : 'r.created_at DESC';
   const filter = `WHERE ${where.join(' AND ')}`;
-  const rows = all<any>(`${BOOK_SELECT} ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`, [...params, p.pageSize, p.offset]);
-  const total = scalar<number>(
+  const rows = await all<any>(`${BOOK_SELECT} ${filter} ORDER BY ${order} LIMIT ? OFFSET ?`, [...params, p.pageSize, p.offset]);
+  const total = await scalar<number>(
     `SELECT COUNT(*) FROM resources r ${filter}`, params
   );
-  const categories = all<any>(
+  const categories = (await all<any>(
     `SELECT r.category AS name, COUNT(*) AS count FROM resources r
      WHERE r.kind = 'ebook' AND r.status = 'approved' AND r.category IS NOT NULL AND r.category <> ''
      GROUP BY r.category ORDER BY r.category`
-  ).map((r) => ({ name: r.name, count: Number(r.count) }));
+  )).map((r) => ({ name: r.name, count: Number(r.count) }));
   res.json({
     ...paginated(rows.map(mapBook), total, p),
     summary: { total: Number(total), categories },
@@ -145,38 +145,38 @@ router.get('/books/manage', requireStaff, asyncH(async (req, res) => {
     params.push(q, q);
   }
   const filter = `WHERE ${where.join(' AND ')}`;
-  const rows = all<any>(`${BOOK_SELECT} ${filter} ORDER BY r.created_at DESC LIMIT ? OFFSET ?`, [...params, p.pageSize, p.offset]);
-  const total = scalar<number>(`SELECT COUNT(*) FROM resources r ${filter}`, params);
+  const rows = await all<any>(`${BOOK_SELECT} ${filter} ORDER BY r.created_at DESC LIMIT ? OFFSET ?`, [...params, p.pageSize, p.offset]);
+  const total = await scalar<number>(`SELECT COUNT(*) FROM resources r ${filter}`, params);
   const summary = {
-    total: scalar<number>("SELECT COUNT(*) FROM resources WHERE kind = 'ebook'"),
-    published: scalar<number>("SELECT COUNT(*) FROM resources WHERE kind = 'ebook' AND status = 'approved'"),
-    drafts: scalar<number>("SELECT COUNT(*) FROM resources WHERE kind = 'ebook' AND status <> 'approved'"),
-    views: scalar<number>("SELECT COALESCE(SUM(view_count),0) FROM resources WHERE kind = 'ebook'"),
+    total: await scalar<number>("SELECT COUNT(*) FROM resources WHERE kind = 'ebook'"),
+    published: await scalar<number>("SELECT COUNT(*) FROM resources WHERE kind = 'ebook' AND status = 'approved'"),
+    drafts: await scalar<number>("SELECT COUNT(*) FROM resources WHERE kind = 'ebook' AND status <> 'approved'"),
+    views: await scalar<number>("SELECT COALESCE(SUM(view_count),0) FROM resources WHERE kind = 'ebook'"),
   };
   res.json({ ...paginated(rows.map(mapBook), total, p), summary });
 }));
 
 router.get('/books/:id', requireAuth, asyncH(async (req, res) => {
   const id = Number(req.params.id);
-  const row = get<any>(`${BOOK_SELECT} WHERE r.kind = 'ebook' AND r.id = ?`, [id]);
+  const row = await get<any>(`${BOOK_SELECT} WHERE r.kind = 'ebook' AND r.id = ?`, [id]);
   if (!row) throw notFound('Book not found.');
   if (row.status !== 'approved' && !['librarian', 'admin'].includes(req.user!.role)) {
     throw notFound('Book not found.');
   }
-  const seen = get<any>(
+  const seen = await get<any>(
     `SELECT id FROM resource_events WHERE resource_id = ? AND user_id = ? AND type = 'view' AND date(created_at) = date('now')`,
     [id, req.user!.id]
   );
   if (!seen) {
-    run(`INSERT INTO resource_events (resource_id, user_id, type, created_at) VALUES (?, ?, 'view', ?)`, [id, req.user!.id, nowIso()]);
-    run('UPDATE resources SET view_count = view_count + 1 WHERE id = ?', [id]);
+    await run(`INSERT INTO resource_events (resource_id, user_id, type, created_at) VALUES (?, ?, 'view', ?)`, [id, req.user!.id, nowIso()]);
+    await run('UPDATE resources SET view_count = view_count + 1 WHERE id = ?', [id]);
   }
-  res.json({ book: mapBook(get<any>('SELECT * FROM resources WHERE id = ?', [id])) });
+  res.json({ book: mapBook(await get<any>('SELECT * FROM resources WHERE id = ?', [id])) });
 }));
 
 router.get('/books/:id/file', requireAuth, asyncH(async (req, res) => {
   const id = Number(req.params.id);
-  const book = get<any>('SELECT * FROM resources WHERE id = ? AND kind = \'ebook\'', [id]);
+  const book = await get<any>('SELECT * FROM resources WHERE id = ? AND kind = \'ebook\'', [id]);
   if (!book) throw notFound('Book not found.');
   if (book.status !== 'approved' && !['librarian', 'admin'].includes(req.user!.role)) throw notFound('Book not found.');
   if (!book.file_key) throw notFound('This book has no file attached.');
@@ -186,7 +186,7 @@ router.get('/books/:id/file', requireAuth, asyncH(async (req, res) => {
   const download = req.query.mode === 'download';
   if (download && !book.allow_download) throw badRequest('Downloads are switched off for this book. You can still read it online.');
   if (download) {
-    run('UPDATE resources SET download_count = download_count + 1 WHERE id = ?', [id]);
+    await run('UPDATE resources SET download_count = download_count + 1 WHERE id = ?', [id]);
   }
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename="${encodeURIComponent(book.file_name || `${book.title}.pdf`)}"`);
@@ -221,7 +221,7 @@ router.post('/books', requireStaff, fields, asyncH(async (req, res) => {
   const fileKey = saveFile(pdf.buffer);
   const coverName = cover ? saveCover(cover.buffer) : null;
   const stamp = nowIso();
-  const result = run(
+  const result = await run(
     `INSERT INTO resources (title, description, kind, author, published_year, language, file_key, file_name,
        file_mime, file_size, cover_color, cover_url, category, allow_download, access, status, submitted_by,
        approved_by, approved_at, created_at, updated_at)
@@ -234,16 +234,16 @@ router.post('/books', requireStaff, fields, asyncH(async (req, res) => {
       (data.status ?? 'approved') === 'approved' ? stamp : null, stamp, stamp,
     ]
   );
-  audit({
+  await audit({
     userId: req.user!.id, action: 'book.create', entityType: 'resource', entityId: result.lastInsertRowid,
     summary: `Uploaded book “${data.title}”`,
   });
-  res.status(201).json({ book: mapBook(get<any>('SELECT * FROM resources WHERE id = ?', [result.lastInsertRowid])) });
+  res.status(201).json({ book: mapBook(await get<any>('SELECT * FROM resources WHERE id = ?', [result.lastInsertRowid])) });
 }));
 
 router.patch('/books/:id', requireStaff, fields, asyncH(async (req, res) => {
   const id = Number(req.params.id);
-  const book = get<any>("SELECT * FROM resources WHERE id = ? AND kind = 'ebook'", [id]);
+  const book = await get<any>("SELECT * FROM resources WHERE id = ? AND kind = 'ebook'", [id]);
   if (!book) throw notFound('Book not found.');
   const data = parse(bookFields.partial(), req.body);
   const files = req.files as Uploaded | undefined;
@@ -284,21 +284,21 @@ router.patch('/books/:id', requireStaff, fields, asyncH(async (req, res) => {
   if (!sets.length) throw badRequest('Nothing to update.');
   sets.push('updated_at = ?');
   params.push(nowIso(), id);
-  run(`UPDATE resources SET ${sets.join(', ')} WHERE id = ?`, params);
-  audit({ userId: req.user!.id, action: 'book.update', entityType: 'resource', entityId: id, summary: `Updated book “${data.title ?? book.title}”` });
-  res.json({ book: mapBook(get<any>('SELECT * FROM resources WHERE id = ?', [id])) });
+  await run(`UPDATE resources SET ${sets.join(', ')} WHERE id = ?`, params);
+  await audit({ userId: req.user!.id, action: 'book.update', entityType: 'resource', entityId: id, summary: `Updated book “${data.title ?? book.title}”` });
+  res.json({ book: mapBook(await get<any>('SELECT * FROM resources WHERE id = ?', [id])) });
 }));
 
 router.delete('/books/:id', requireStaff, asyncH(async (req, res) => {
   const id = Number(req.params.id);
-  const book = get<any>("SELECT * FROM resources WHERE id = ? AND kind = 'ebook'", [id]);
+  const book = await get<any>("SELECT * FROM resources WHERE id = ? AND kind = 'ebook'", [id]);
   if (!book) throw notFound('Book not found.');
   removeFile(book.file_key);
   if (book.cover_url?.startsWith('/api/media/covers/')) removeFile(book.cover_url.split('/').pop(), COVER_DIR);
-  run('DELETE FROM resource_events WHERE resource_id = ?', [id]);
-  run('DELETE FROM resource_favorites WHERE resource_id = ?', [id]);
-  run('DELETE FROM resources WHERE id = ?', [id]);
-  audit({ userId: req.user!.id, action: 'book.delete', entityType: 'resource', entityId: id, summary: `Removed book “${book.title}”` });
+  await run('DELETE FROM resource_events WHERE resource_id = ?', [id]);
+  await run('DELETE FROM resource_favorites WHERE resource_id = ?', [id]);
+  await run('DELETE FROM resources WHERE id = ?', [id]);
+  await audit({ userId: req.user!.id, action: 'book.delete', entityType: 'resource', entityId: id, summary: `Removed book “${book.title}”` });
   res.json({ ok: true });
 }));
 

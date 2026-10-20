@@ -36,10 +36,10 @@ router.get('/', asyncH(async (_req, res) => {
 router.patch('/', requireAdmin, asyncH(async (req, res) => {
   const data = parse(brandingSchema, req.body);
   const before = getSettings();
-  const settings = updateSettings(data);
+  const settings = await updateSettings(data);
   const changed = (Object.keys(data) as (keyof typeof data)[])
     .filter((key) => String(before[key] ?? '') !== String(settings[key] ?? ''));
-  audit({
+  await audit({
     userId: req.user!.id,
     action: 'settings.branding',
     entityType: 'settings',
@@ -87,9 +87,9 @@ router.post('/logo', requireAdmin, upload.single('logo'), asyncH(async (req, res
   const previous = getSettings().logoUrl;
   const name = `${Date.now().toString(36)}-${crypto.randomBytes(5).toString('hex')}.${kind}`;
   fs.writeFileSync(path.join(BRAND_DIR, name), file.buffer);
-  const settings = updateSettings({ logoUrl: `/api/media/branding/${name}` });
+  const settings = await updateSettings({ logoUrl: `/api/media/branding/${name}` });
   removeBrandingFile(previous);
-  audit({
+  await audit({
     userId: req.user!.id,
     action: 'settings.logo',
     entityType: 'settings',
@@ -101,9 +101,9 @@ router.post('/logo', requireAdmin, upload.single('logo'), asyncH(async (req, res
 
 router.delete('/logo', requireAdmin, asyncH(async (req, res) => {
   const previous = getSettings().logoUrl;
-  const settings = updateSettings({ logoUrl: '' });
+  const settings = await updateSettings({ logoUrl: '' });
   removeBrandingFile(previous);
-  audit({
+  await audit({
     userId: req.user!.id,
     action: 'settings.logo',
     entityType: 'settings',

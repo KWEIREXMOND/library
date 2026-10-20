@@ -60,7 +60,7 @@ export function clientIp(req: Request): string {
   return req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
-export function audit(opts: {
+export async function audit(opts: {
   userId?: number | null;
   action: string;
   entityType?: string;
@@ -69,7 +69,7 @@ export function audit(opts: {
   details?: unknown;
   ip?: string;
 }) {
-  run(
+  await run(
     `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, summary, details, ip, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
@@ -85,7 +85,7 @@ export function audit(opts: {
   );
 }
 
-export function notify(opts: {
+export async function notify(opts: {
   userId: number;
   type: string;
   title: string;
@@ -99,7 +99,7 @@ export function notify(opts: {
   const stamp = nowIso();
   let notificationId = 0;
   try {
-    const res = run(
+    const res = await run(
       `INSERT INTO notifications (user_id, type, title, body, link, dedupe_key, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [opts.userId, opts.type, opts.title, opts.body, opts.link ?? null, opts.dedupeKey ?? null, stamp]
@@ -112,19 +112,19 @@ export function notify(opts: {
 
   const settings = getSettings();
   if (settings.emailNotificationsEnabled || opts.email) {
-    const user = get<{ email: string }>('SELECT email FROM users WHERE id = ?', [opts.userId]);
+    const user = await get<{ email: string }>('SELECT email FROM users WHERE id = ?', [opts.userId]);
     if (!user?.email) {
-      logDelivery(notificationId, 'failed', 'The account has no email address.', stamp);
+      await logDelivery(notificationId, 'failed', 'The account has no email address.', stamp);
     } else if (!emailConfigured()) {
-      logDelivery(notificationId, 'failed', 'Email transport is not configured (set SMTP_URL). Notification kept in-app.', stamp);
+      await logDelivery(notificationId, 'failed', 'Email transport is not configured (set SMTP_URL). Notification kept in-app.', stamp);
     } else {
-      const deliveryId = logDelivery(notificationId, 'queued', `Recipient ${user.email}`, stamp);
+      const deliveryId = await logDelivery(notificationId, 'queued', `Recipient ${user.email}`, stamp);
       void sendMail({
         to: user.email,
         subject: opts.emailSubject ?? opts.title,
         text: opts.emailBody ?? `${opts.title}\n\n${opts.body}\n\n— Tema Secondary Library`,
-      }).then((result) => {
-        run('UPDATE notification_deliveries SET status = ?, detail = ? WHERE id = ?', [
+      }).then(async (result) => {
+        await run('UPDATE notification_deliveries SET status = ?, detail = ? WHERE id = ?', [
           result.ok ? 'sent' : 'failed',
           result.detail,
           deliveryId,
@@ -135,8 +135,8 @@ export function notify(opts: {
   return notificationId;
 }
 
-function logDelivery(notificationId: number, status: string, detail: string, stamp: string): number {
-  const res = run(
+async function logDelivery(notificationId: number, status: string, detail: string, stamp: string): Promise<number> {
+  const res = await run(
     `INSERT INTO notification_deliveries (notification_id, channel, status, detail, created_at)
      VALUES (?, 'email', ?, ?, ?)`,
     [notificationId, status, detail, stamp]
@@ -144,11 +144,11 @@ function logDelivery(notificationId: number, status: string, detail: string, sta
   return Number(res.lastInsertRowid);
 }
 
-export function notifyMany(
+export async function notifyMany(
   userIds: number[],
   opts: { type: string; title: string; body: string; link?: string; dedupeKey?: string }
 ) {
-  for (const id of userIds) notify({ userId: id, ...opts, dedupeKey: opts.dedupeKey ? `${opts.dedupeKey}:${id}` : undefined });
+  for (const id of userIds) await notify({ userId: id, ...opts, dedupeKey: opts.dedupeKey ? `${opts.dedupeKey}:${id}` : undefined });
 }
 
 export function csvResponse(res: Response, filename: string, columns: { key: string; label: string }[], rows: Record<string, unknown>[]) {
@@ -217,28 +217,27 @@ export function calculateFine(dueDate: string, at = new Date()): { days: number;
   return { days, amount: Math.round(amount * 100) / 100 };
 }
 
-export function outstandingBalance(userId: number): number {
-  return Number(
-    get<{ total: number }>(
-      `SELECT COALESCE(SUM(amount - paid_amount - waived_amount), 0) AS total FROM charges
-       WHERE user_id = ? AND status IN ('outstanding','partial')`,
-      [userId]
-    )?.total ?? 0
+export async function outstandingBalance(userId: number): Promise<number> {
+  const row = await get<{ total: number }>(
+    `SELECT COALESCE(SUM(amount - paid_amount - waived_amount), 0) AS total FROM charges
+     WHERE user_id = ? AND status IN ('outstanding','partial')`,
+    [userId]
   );
+  return Number(row?.total ?? 0);
 }
 
 /** Expire uncollected reservations and release held copies, then advance queues. */
-export function expireReservations() {
+export async function expireReservations() {
   const stamp = nowIso();
-  const expired = all<{ id: number; user_id: number; title_id: number }>(
+  const expired = await all<{ id: number; user_id: number; title_id: number }>(
     `SELECT id, user_id, title_id FROM reservations
      WHERE status = 'ready' AND expires_at IS NOT NULL AND expires_at < ?`,
     [stamp]
   );
   for (const r of expired) {
-    run(`UPDATE reservations SET status = 'expired', resolved_at = ? WHERE id = ?`, [stamp, r.id]);
-    releaseHeldCopy(r.title_id);
-    notify({
+    await run(`UPDATE reservations SET status = 'expired', resolved_at = ? WHERE id = ?`, [stamp, r.id]);
+    await releaseHeldCopy(r.title_id);
+    await notify({
       userId: r.user_id,
       type: 'reservation_expired',
       title: 'Reservation expired',
@@ -246,43 +245,44 @@ export function expireReservations() {
       link: '/app/reservations',
       dedupeKey: `res-expired-${r.id}`,
     });
-    advanceQueue(r.title_id);
+    await advanceQueue(r.title_id);
   }
 }
 
 /** Release a copy held for a ready reservation that no longer exists. */
-export function releaseHeldCopy(titleId: number) {
-  const held = get<{ id: number }>(
+export async function releaseHeldCopy(titleId: number) {
+  const held = await get<{ id: number }>(
     `SELECT id FROM copies WHERE title_id = ? AND status = 'reserved' AND id NOT IN (
        SELECT COALESCE(copy_id, 0) FROM loans WHERE status = 'active'
      ) LIMIT 1`,
     [titleId]
   );
-  const stillReady = get<{ id: number }>(
+  const stillReady = await get<{ id: number }>(
     `SELECT id FROM reservations WHERE title_id = ? AND status = 'ready' LIMIT 1`,
     [titleId]
   );
   if (held && !stillReady) {
-    run(`UPDATE copies SET status = 'available', updated_at = ? WHERE id = ?`, [nowIso(), held.id]);
+    await run(`UPDATE copies SET status = 'available', updated_at = ? WHERE id = ?`, [nowIso(), held.id]);
   }
 }
 
 /** Promote the next waiting member when a copy is available. */
-export function advanceQueue(titleId: number) {
+export async function advanceQueue(titleId: number) {
   const settings = getSettings();
-  const readyCount = get<{ n: number }>(
+  const readyRow = await get<{ n: number }>(
     `SELECT COUNT(*) AS n FROM reservations WHERE title_id = ? AND status = 'ready'`,
     [titleId]
-  )?.n ?? 0;
+  );
+  const readyCount = Number(readyRow?.n ?? 0);
   if (readyCount > 0) return;
-  const available = get<{ id: number }>(
+  const available = await get<{ id: number }>(
     `SELECT id FROM copies WHERE title_id = ? AND status = 'available' AND id NOT IN (
        SELECT COALESCE(copy_id, 0) FROM loans WHERE status = 'active'
      ) LIMIT 1`,
     [titleId]
   );
   if (!available) return;
-  const next = get<{ id: number; user_id: number }>(
+  const next = await get<{ id: number; user_id: number }>(
     `SELECT id, user_id FROM reservations WHERE title_id = ? AND status = 'waiting'
      ORDER BY created_at ASC, id ASC LIMIT 1`,
     [titleId]
@@ -290,13 +290,13 @@ export function advanceQueue(titleId: number) {
   if (!next) return;
   const readyAt = new Date();
   const expires = new Date(readyAt.getTime() + settings.reservationHoldDays * 86_400_000);
-  run(
+  await run(
     `UPDATE reservations SET status = 'ready', ready_at = ?, expires_at = ? WHERE id = ?`,
     [readyAt.toISOString(), expires.toISOString(), next.id]
   );
-  run(`UPDATE copies SET status = 'reserved', updated_at = ? WHERE id = ?`, [nowIso(), available.id]);
-  const title = get<{ title: string }>('SELECT title FROM titles WHERE id = ?', [titleId]);
-  notify({
+  await run(`UPDATE copies SET status = 'reserved', updated_at = ? WHERE id = ?`, [nowIso(), available.id]);
+  const title = await get<{ title: string }>('SELECT title FROM titles WHERE id = ?', [titleId]);
+  await notify({
     userId: next.user_id,
     type: 'reservation_ready',
     title: 'Your reserved book is ready',
@@ -307,9 +307,9 @@ export function advanceQueue(titleId: number) {
 }
 
 /** Create due-soon and overdue notifications. Idempotent via dedupe keys. */
-export function runDueReminders() {
+export async function runDueReminders(): Promise<number> {
   const settings = getSettings();
-  const active = all<{
+  const active = await all<{
     id: number; user_id: number; due_date: string; title: string; first_name: string;
   }>(
     `SELECT l.id, l.user_id, l.due_date, t.title, u.first_name
@@ -321,7 +321,7 @@ export function runDueReminders() {
   for (const loan of active) {
     const days = daysBetween(loan.due_date, today);
     if (days > 0) {
-      const res = notify({
+      const res = await notify({
         userId: loan.user_id,
         type: 'overdue',
         title: `Overdue: ${loan.title}`,
@@ -332,7 +332,7 @@ export function runDueReminders() {
       if (res) sent++;
     } else if (days >= -settings.dueSoonReminderDays) {
       const dueLabel = new Date(loan.due_date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
-      const res = notify({
+      const res = await notify({
         userId: loan.user_id,
         type: 'due_soon',
         title: `Due soon: ${loan.title}`,

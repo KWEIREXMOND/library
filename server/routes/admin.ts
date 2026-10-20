@@ -102,20 +102,20 @@ router.get('/people', requireAdmin, asyncH(async (req, res) => {
   const { where, params } = peopleFilter(kind, search);
   const p = pagination(req, 20, 100);
 
-  const rows = all<PersonRow>(
+  const rows = await all<PersonRow>(
     `${PEOPLE_CTE}
      SELECT * FROM people WHERE ${where}
      ORDER BY COALESCE(last_visit, joined_at) DESC, name COLLATE NOCASE
      LIMIT ? OFFSET ?`,
     [...params, p.pageSize, p.offset]
   );
-  const total = scalar<number>(`${PEOPLE_CTE} SELECT COUNT(*) FROM people WHERE ${where}`, params);
+  const total = await scalar<number>(`${PEOPLE_CTE} SELECT COUNT(*) FROM people WHERE ${where}`, params);
 
   const summary = {
-    members: scalar<number>('SELECT COUNT(*) FROM users'),
-    students: scalar<number>("SELECT COUNT(*) FROM users WHERE role = 'student'"),
-    suspended: scalar<number>("SELECT COUNT(*) FROM users WHERE status = 'suspended'"),
-    walkIns: scalar<number>(
+    members: await scalar<number>('SELECT COUNT(*) FROM users'),
+    students: await scalar<number>("SELECT COUNT(*) FROM users WHERE role = 'student'"),
+    suspended: await scalar<number>("SELECT COUNT(*) FROM users WHERE status = 'suspended'"),
+    walkIns: await scalar<number>(
       'SELECT COUNT(*) FROM (SELECT 1 FROM library_visits WHERE user_id IS NULL GROUP BY LOWER(full_name))'
     ),
   };
@@ -129,13 +129,13 @@ router.get('/people/:kind/:key', requireAdmin, asyncH(async (req, res) => {
   const key = decodeURIComponent(req.params.key);
 
   if (kind === 'member') {
-    const row = get<PersonRow>(
+    const row = await get<PersonRow>(
       `${PEOPLE_CTE}
        SELECT * FROM people WHERE kind = 'member' AND key = ?`,
       [key]
     );
     if (!row) throw notFound('That person is not in the register.');
-    const visits = all(
+    const visits = await all(
       `SELECT id, full_name, class_name, house, purpose, book_taken, signed_in_at, signed_out_at, minutes
        FROM (SELECT *, CAST((julianday(COALESCE(signed_out_at, ?)) - julianday(signed_in_at)) * 1440 AS INTEGER) AS minutes
              FROM library_visits WHERE user_id = ?)
@@ -147,7 +147,7 @@ router.get('/people/:kind/:key', requireAdmin, asyncH(async (req, res) => {
   }
 
   if (kind !== 'walkin') throw notFound('Unknown person type.');
-  const rows = all<any>(
+  const rows = await all<any>(
     `SELECT id, full_name, class_name, house, purpose, book_taken, signed_in_at, signed_out_at,
             CAST((julianday(COALESCE(signed_out_at, ?)) - julianday(signed_in_at)) * 1440 AS INTEGER) AS minutes
      FROM library_visits
@@ -157,7 +157,7 @@ router.get('/people/:kind/:key', requireAdmin, asyncH(async (req, res) => {
   );
   if (!rows.length) throw notFound('That visitor is not in the register.');
 
-  const person = get<PersonRow>(
+  const person = await get<PersonRow>(
     `${PEOPLE_CTE}
      SELECT * FROM people WHERE kind = 'walkin' AND key = ?`,
     [key.toLowerCase()]
@@ -172,12 +172,12 @@ router.patch('/people/:id/status', requireAdmin, asyncH(async (req, res) => {
   if (id === req.user!.id) throw badRequest('You cannot change the status of your own account.');
   const schema = z.object({ status: z.enum(['active', 'suspended']) });
   const { status } = parse(schema, req.body);
-  const user = get<any>('SELECT id, first_name, last_name, status FROM users WHERE id = ?', [id]);
+  const user = await get<any>('SELECT id, first_name, last_name, status FROM users WHERE id = ?', [id]);
   if (!user) throw notFound('That account does not exist.');
   if (user.status === status) throw conflict(`${user.first_name} is already ${status === 'active' ? 'active' : 'suspended'}.`);
   // Bumping token_version signs the account out everywhere it is already open.
-  run('UPDATE users SET status = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?', [status, nowIso(), id]);
-  audit({
+  await run('UPDATE users SET status = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?', [status, nowIso(), id]);
+  await audit({
     userId: req.user!.id,
     action: status === 'suspended' ? 'user.suspend' : 'user.activate',
     entityType: 'user',
@@ -196,12 +196,12 @@ router.post('/people/:id/reset-password', requireAdmin, asyncH(async (req, res) 
   });
   const { password } = parse(schema, req.body);
   if (id === req.user!.id) throw badRequest('Use your own account menu to change your password.');
-  const user = get<any>('SELECT id, first_name, last_name FROM users WHERE id = ?', [id]);
+  const user = await get<any>('SELECT id, first_name, last_name FROM users WHERE id = ?', [id]);
   if (!user) throw notFound('That account does not exist.');
-  run('UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?',
+  await run('UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?',
     [hashPassword(password), nowIso(), id]);
-  run('DELETE FROM password_resets WHERE user_id = ? AND used_at IS NULL', [id]);
-  audit({
+  await run('DELETE FROM password_resets WHERE user_id = ? AND used_at IS NULL', [id]);
+  await audit({
     userId: req.user!.id,
     action: 'user.password_reset',
     entityType: 'user',
@@ -216,10 +216,10 @@ router.post('/people/:id/sign-out', requireAdmin, asyncH(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) throw badRequest('That account is not valid.');
   if (id === req.user!.id) throw badRequest('Use the sign-out button in your own account menu.');
-  const user = get<any>('SELECT id, first_name, last_name FROM users WHERE id = ?', [id]);
+  const user = await get<any>('SELECT id, first_name, last_name FROM users WHERE id = ?', [id]);
   if (!user) throw notFound('That account does not exist.');
-  run('UPDATE users SET token_version = token_version + 1, updated_at = ? WHERE id = ?', [nowIso(), id]);
-  audit({
+  await run('UPDATE users SET token_version = token_version + 1, updated_at = ? WHERE id = ?', [nowIso(), id]);
+  await audit({
     userId: req.user!.id,
     action: 'user.force_signout',
     entityType: 'user',
@@ -234,11 +234,11 @@ router.get('/people/export.csv', requireAdmin, asyncH(async (req, res) => {
   const kind = ['all', 'member', 'walkin'].includes(String(req.query.kind)) ? String(req.query.kind) : 'all';
   const query = cleanSearch(String(req.query.q ?? '')).toLowerCase();
   const { where, params } = peopleFilter(kind, query ? `%${query}%` : '');
-  const rows = all<PersonRow>(
+  const rows = (await all<PersonRow>(
     `${PEOPLE_CTE} SELECT * FROM people WHERE ${where}
      ORDER BY COALESCE(last_visit, joined_at) DESC, name COLLATE NOCASE`,
     params
-  ).map(mapPerson);
+  )).map(mapPerson);
 
   const quote = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
   const header = ['Type', 'Library ID', 'Name', 'Email', 'Role', 'Status', 'Class', 'House', 'Visits', 'Last visit', 'Joined'];
@@ -288,7 +288,7 @@ router.get('/announcements', asyncH(async (req, res) => {
       : role === 'librarian' || role === 'admin' ? ['all', 'staff']
         : ['all'];
   const stamp = nowIso();
-  const rows = all<Announcement>(
+  const rows = await all<Announcement>(
     `${ANNOUNCEMENT_SELECT}
      WHERE a.status = 'published' AND a.publish_at <= ?
        AND (a.expires_at IS NULL OR a.expires_at > ?)
@@ -315,19 +315,21 @@ router.get('/announcements/manage', requireAdmin, asyncH(async (req, res) => {
     params.push(`%${query}%`, `%${query}%`);
   }
   const filter = where.join(' AND ');
-  const rows = all<Announcement>(
+  const rows = await all<Announcement>(
     `${ANNOUNCEMENT_SELECT} WHERE ${filter} ORDER BY a.pinned DESC, a.publish_at DESC LIMIT ? OFFSET ?`,
     [...params, p.pageSize, p.offset]
   );
-  const total = scalar<number>(`SELECT COUNT(*) FROM announcements a WHERE ${filter}`, params);
+  const total = await scalar<number>(`SELECT COUNT(*) FROM announcements a WHERE ${filter}`, params);
   const audiences = Object.fromEntries(
-    Object.entries(AUDIENCE_ROLES).map(([key, roles]) => [
-      key,
-      scalar<number>(
-        `SELECT COUNT(*) FROM users WHERE status = 'active' AND role IN (${roles.map(() => '?').join(',')})`,
-        roles
-      ),
-    ])
+    await Promise.all(
+      Object.entries(AUDIENCE_ROLES).map(async ([key, roles]) => [
+        key,
+        await scalar<number>(
+          `SELECT COUNT(*) FROM users WHERE status = 'active' AND role IN (${roles.map(() => '?').join(',')})`,
+          roles
+        ),
+      ] as const)
+    )
   );
   res.json({ ...paginated(rows.map(mapAnnouncement), total, p), audiences });
 }));
@@ -353,35 +355,35 @@ const AUDIENCE_ROLES: Record<'all' | 'students' | 'teachers' | 'staff', string[]
 router.post('/announcements', requireAdmin, asyncH(async (req, res) => {
   const data = parse(broadcastSchema, req.body);
   const stamp = nowIso();
-  const result = run(
+  const result = await run(
     `INSERT INTO announcements (title, body, audience, pinned, status, publish_at, expires_at, created_by, created_at)
      VALUES (?, ?, ?, ?, 'published', ?, ?, ?, ?)`,
     [data.title, data.body, data.audience, data.pinned ? 1 : 0, stamp, expiryOf(data.expiresAt), req.user!.id, stamp]
   );
-  const recipients = all<{ id: number }>(
+  const recipients = await all<{ id: number }>(
     `SELECT id FROM users WHERE status = 'active' AND role IN (${AUDIENCE_ROLES[data.audience].map(() => '?').join(',')})`,
     AUDIENCE_ROLES[data.audience]
   );
-  notifyMany(recipients.map((recipient) => recipient.id), {
+  await notifyMany(recipients.map((recipient) => recipient.id), {
     type: 'broadcast',
     title: data.title,
     body: data.body,
     dedupeKey: `announcement:${result.lastInsertRowid}`,
   });
-  audit({
+  await audit({
     userId: req.user!.id,
     action: 'announcement.publish',
     entityType: 'announcement',
     entityId: result.lastInsertRowid,
     summary: `Published “${data.title}” to ${data.audience} (${recipients.length} inbox${recipients.length === 1 ? '' : 'es'})`,
   });
-  const row = get<Announcement>(`${ANNOUNCEMENT_SELECT} WHERE a.id = ?`, [result.lastInsertRowid]);
+  const row = await get<Announcement>(`${ANNOUNCEMENT_SELECT} WHERE a.id = ?`, [result.lastInsertRowid]);
   res.status(201).json({ announcement: mapAnnouncement(row!) });
 }));
 
 router.patch('/announcements/:id', requireAdmin, asyncH(async (req, res) => {
   const id = Number(req.params.id);
-  const row = get<any>('SELECT * FROM announcements WHERE id = ?', [id]);
+  const row = await get<any>('SELECT * FROM announcements WHERE id = ?', [id]);
   if (!row) throw notFound('That broadcast does not exist.');
   const schema = z.object({
     pinned: z.boolean().optional(),
@@ -396,24 +398,24 @@ router.patch('/announcements/:id', requireAdmin, asyncH(async (req, res) => {
   if (data.expiresAt !== undefined) { sets.push('expires_at = ?'); params.push(expiryOf(data.expiresAt)); }
   if (!sets.length) throw badRequest('Nothing to change.');
   params.push(id);
-  run(`UPDATE announcements SET ${sets.join(', ')} WHERE id = ?`, params);
-  audit({
+  await run(`UPDATE announcements SET ${sets.join(', ')} WHERE id = ?`, params);
+  await audit({
     userId: req.user!.id,
     action: data.status === 'archived' ? 'announcement.archive' : 'announcement.update',
     entityType: 'announcement',
     entityId: id,
     summary: `Updated broadcast “${row.title}”`,
   });
-  res.json({ announcement: mapAnnouncement(get<Announcement>(`${ANNOUNCEMENT_SELECT} WHERE a.id = ?`, [id])!) });
+  res.json({ announcement: mapAnnouncement((await get<Announcement>(`${ANNOUNCEMENT_SELECT} WHERE a.id = ?`, [id]))!) });
 }));
 
 router.delete('/announcements/:id', requireAdmin, asyncH(async (req, res) => {
   const id = Number(req.params.id);
-  const row = get<any>('SELECT title FROM announcements WHERE id = ?', [id]);
+  const row = await get<any>('SELECT title FROM announcements WHERE id = ?', [id]);
   if (!row) throw notFound('That broadcast does not exist.');
-  run('DELETE FROM notifications WHERE dedupe_key LIKE ?', [`announcement:${id}:%`]);
-  run('DELETE FROM announcements WHERE id = ?', [id]);
-  audit({
+  await run('DELETE FROM notifications WHERE dedupe_key LIKE ?', [`announcement:${id}:%`]);
+  await run('DELETE FROM announcements WHERE id = ?', [id]);
+  await audit({
     userId: req.user!.id,
     action: 'announcement.delete',
     entityType: 'announcement',
@@ -434,7 +436,7 @@ router.get('/activity', requireAdmin, asyncH(async (req, res) => {
     params.push(`%${query}%`, `%${query}%`, `%${query}%`);
   }
   const filter = where.join(' AND ');
-  const rows = all(
+  const rows = await all(
     `SELECT l.id, l.action, l.entity_type AS entityType, l.entity_id AS entityId, l.summary,
             l.ip, l.created_at AS createdAt,
             CASE WHEN u.id IS NULL THEN 'System' ELSE u.first_name || ' ' || u.last_name END AS actor,
@@ -444,7 +446,7 @@ router.get('/activity', requireAdmin, asyncH(async (req, res) => {
      ORDER BY l.created_at DESC, l.id DESC LIMIT ? OFFSET ?`,
     [...params, p.pageSize, p.offset]
   );
-  const total = scalar<number>(
+  const total = await scalar<number>(
     `SELECT COUNT(*) FROM audit_logs l LEFT JOIN users u ON u.id = l.user_id WHERE ${filter}`,
     params
   );

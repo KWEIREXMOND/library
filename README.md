@@ -15,7 +15,8 @@ npm run seed     # creates the demo library (never run while the API is up)
 npm run dev      # API on :4000, web on :5173
 ```
 
-The database lives in `data/libra.db` (SQLite via `node:sqlite`). Uploaded PDFs and covers live in
+The database is libSQL — a plain SQLite file in `data/libra.db` for development, or a hosted
+[Turso](https://turso.tech) database when `LIBSQL_URL` is set. Uploaded PDFs and covers live in
 `data/uploads/` and are ignored by Git.
 
 Useful scripts:
@@ -31,10 +32,12 @@ Useful scripts:
 
 ## Deploying
 
-The app is one Node process: Express serves `/api` **and** the built client from `dist/`. SQLite and
-the uploaded PDFs live in `DATA_DIR`, so that directory is the only thing that needs a persistent disk.
+The app is one Node process: Express serves `/api` **and** the built client from `dist/`. The database
+is libSQL (SQLite file by default), and uploaded PDFs live in `DATA_DIR`, so that directory is the only
+thing that needs a persistent disk.
 
-**Requirements:** Node **22.5+** (the server uses `node:sqlite`), and a writable `DATA_DIR`.
+**Requirements:** Node **22+**, and a writable `DATA_DIR` — unless `LIBSQL_URL` points at a hosted
+database, in which case only the uploads need a disk.
 
 ```bash
 npm ci

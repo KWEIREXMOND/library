@@ -32,32 +32,32 @@ const mapNotification = (row: NotificationRow) => ({
 
 router.get('/', requireAuth, asyncH(async (req, res) => {
   const p = pagination(req, 20, 50);
-  const rows = all<NotificationRow>(
+  const rows = await all<NotificationRow>(
     `SELECT id, type, title, body, link, read_at, created_at FROM notifications
      WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
     [req.user!.id, p.pageSize, p.offset]
   );
-  const total = scalar<number>('SELECT COUNT(*) FROM notifications WHERE user_id = ?', [req.user!.id]);
-  const unread = scalar<number>('SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL', [req.user!.id]);
+  const total = await scalar<number>('SELECT COUNT(*) FROM notifications WHERE user_id = ?', [req.user!.id]);
+  const unread = await scalar<number>('SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL', [req.user!.id]);
   res.json({ ...paginated(rows.map(mapNotification), total, p), unread });
 }));
 
 router.get('/unread', requireAuth, asyncH(async (req, res) => {
-  const unread = scalar<number>('SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL', [req.user!.id]);
+  const unread = await scalar<number>('SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL', [req.user!.id]);
   res.json({ unread });
 }));
 
 router.post('/:id/read', requireAuth, asyncH(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) throw badRequest('That message is not valid.');
-  const row = get<{ id: number }>('SELECT id FROM notifications WHERE id = ? AND user_id = ?', [id, req.user!.id]);
+  const row = await get<{ id: number }>('SELECT id FROM notifications WHERE id = ? AND user_id = ?', [id, req.user!.id]);
   if (!row) throw notFound('That message is not in your inbox.');
-  run('UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE id = ? AND user_id = ?', [nowIso(), id, req.user!.id]);
+  await run('UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE id = ? AND user_id = ?', [nowIso(), id, req.user!.id]);
   res.json({ ok: true });
 }));
 
 router.post('/read-all', requireAuth, asyncH(async (req, res) => {
-  const result = run('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL', [nowIso(), req.user!.id]);
+  const result = await run('UPDATE notifications SET read_at = ? WHERE user_id = ? AND read_at IS NULL', [nowIso(), req.user!.id]);
   res.json({ ok: true, marked: Number(result.changes) });
 }));
 

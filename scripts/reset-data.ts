@@ -48,17 +48,18 @@ const CONTENT_TABLES = [
   'titles',
 ];
 
-function counts() {
-  const rows = all<{ name: string }>(
+async function counts() {
+  const rows = await all<{ name: string }>(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
   );
-  return rows
-    .map(({ name }) => ({ table: name, count: scalar<number>(`SELECT COUNT(*) FROM ${name}`) }))
-    .filter((row) => row.count > 0);
+  const counted = await Promise.all(
+    rows.map(async ({ name }) => ({ table: name, count: await scalar<number>(`SELECT COUNT(*) FROM ${name}`) }))
+  );
+  return counted.filter((row) => row.count > 0);
 }
 
-const before = counts();
-const users = all<{ library_id: string; email: string; role: string }>(
+const before = await counts();
+const users = await all<{ library_id: string; email: string; role: string }>(
   'SELECT library_id, email, role FROM users ORDER BY id'
 );
 
@@ -72,35 +73,35 @@ if (!CONFIRM) {
 const backupName = `libra-before-reset-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.db`;
 const backupPath = path.join(BACKUP_DIR, backupName);
 try {
-  run(`VACUUM INTO '${backupPath.replace(/'/g, "''")}'`);
+  await run(`VACUUM INTO '${backupPath.replace(/'/g, "''")}'`);
 } catch {
   /* the reset can still proceed without a snapshot */
 }
 
-tx(() => {
+await tx(async () => {
   for (const table of CONTENT_TABLES) {
-    const exists = scalar<number>(
+    const exists = await scalar<number>(
       "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
       [table]
     );
-    if (exists) run(`DELETE FROM ${table}`);
+    if (exists) await run(`DELETE FROM ${table}`);
   }
   // Demo activity disappears, and every browser session is closed. The
   // accounts (and their passwords) stay exactly as they were.
-  run('UPDATE users SET last_login = NULL, token_version = token_version + 1');
+  await run('UPDATE users SET last_login = NULL, token_version = token_version + 1');
   // Give the content tables fresh IDs. User IDs continue where they left off.
-  run("DELETE FROM sqlite_sequence WHERE name <> 'users'");
+  await run("DELETE FROM sqlite_sequence WHERE name <> 'users'");
   // Point the library-ID counter at the highest account that still exists, so
   // the next registration follows the surviving logins without a gap.
-  for (const sequence of all<{ name: string }>("SELECT name FROM id_sequences WHERE name LIKE 'library_id:%'")) {
+  for (const sequence of await all<{ name: string }>("SELECT name FROM id_sequences WHERE name LIKE 'library_id:%'")) {
     const year = sequence.name.split(':')[1];
-    const highest = scalar<number>(
+    const highest = await scalar<number>(
       'SELECT COALESCE(MAX(CAST(substr(library_id, 10) AS INTEGER)), 0) FROM users WHERE library_id LIKE ?',
       [`LIB-${year}-%`]
     );
-    run('UPDATE id_sequences SET value = ? WHERE name = ?', [highest, sequence.name]);
+    await run('UPDATE id_sequences SET value = ? WHERE name = ?', [highest, sequence.name]);
   }
-  run(
+  await run(
     `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, summary, details, ip, created_at)
      VALUES (NULL, 'system.reset', 'library', NULL, ?, NULL, NULL, ?)`,
     ['Cleared all library content; accounts and site settings were kept', nowIso()]
@@ -122,7 +123,7 @@ for (const dir of [RESOURCE_DIR, COVER_DIR]) {
   }
 }
 
-const after = counts();
+const after = await counts();
 
 console.log('Library content cleared.');
 console.log(`Safety snapshot: ${backupPath}`);
@@ -140,4 +141,4 @@ for (const table of [...tables].sort()) {
   if (from || to) console.log(`  ${table.padEnd(24)} ${String(from).padStart(4)} → ${to}`);
 }
 console.log('');
-console.log(`Kept settings: ${scalar<number>('SELECT COUNT(*) FROM settings')} · subjects/categories: ${scalar<number>('SELECT COUNT(*) FROM subjects')}/${scalar<number>('SELECT COUNT(*) FROM categories')}`);
+console.log(`Kept settings: ${await scalar<number>('SELECT COUNT(*) FROM settings')} · subjects/categories: ${await scalar<number>('SELECT COUNT(*) FROM subjects')}/${await scalar<number>('SELECT COUNT(*) FROM categories')}`);

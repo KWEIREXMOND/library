@@ -17,10 +17,10 @@ export const DEMO_LOGINS = [
   { email: 'student@tema.edu.gh', libraryId: 'LIB-2026-0004' },
 ];
 
-export function pruneToDemoAccounts(extraKeepEmails: string[] = []): number {
+export async function pruneToDemoAccounts(extraKeepEmails: string[] = []): Promise<number> {
   const emails = [...DEMO_LOGINS.map((account) => account.email), ...extraKeepEmails]
     .map((email) => email.toLowerCase());
-  const keep = all<{ id: number; email: string }>(
+  const keep = await all<{ id: number; email: string }>(
     `SELECT id, email FROM users WHERE LOWER(email) IN (${emails.map(() => '?').join(',')})`,
     emails
   );
@@ -35,65 +35,65 @@ export function pruneToDemoAccounts(extraKeepEmails: string[] = []): number {
   const ph = ids.map(() => '?').join(',');
   const librarian = keep.find((row) => row.email === 'librarian@tema.edu.gh')!.id;
 
-  tx(() => {
+  await tx(async () => {
     // Rows owned by people who are about to be removed.
-    run(`DELETE FROM notifications WHERE user_id NOT IN (${ph})`, ids);
-    run(`DELETE FROM saved_books WHERE user_id NOT IN (${ph})`, ids);
-    run(`DELETE FROM password_resets WHERE user_id NOT IN (${ph})`, ids);
-    run(`DELETE FROM resource_events WHERE user_id NOT IN (${ph})`, ids);
-    run(`DELETE FROM resource_favorites WHERE user_id NOT IN (${ph})`, ids);
-    run(`DELETE FROM revoked_tokens WHERE user_id IS NOT NULL AND user_id NOT IN (${ph})`, ids);
-    run(`DELETE FROM book_requests WHERE user_id NOT IN (${ph})`, ids);
-    run(`DELETE FROM reservations WHERE user_id NOT IN (${ph})`, ids);
-    run(`DELETE FROM charges WHERE user_id NOT IN (${ph})`, ids);
-    run(`DELETE FROM loans WHERE user_id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM notifications WHERE user_id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM saved_books WHERE user_id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM password_resets WHERE user_id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM resource_events WHERE user_id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM resource_favorites WHERE user_id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM revoked_tokens WHERE user_id IS NOT NULL AND user_id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM book_requests WHERE user_id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM reservations WHERE user_id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM charges WHERE user_id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM loans WHERE user_id NOT IN (${ph})`, ids);
     // Visits keep their name/class/house snapshots, so they stay on the front
     // desk dashboard as walk-in records once the member account is gone.
-    run(`UPDATE library_visits SET user_id = NULL WHERE user_id IS NOT NULL AND user_id NOT IN (${ph})`, ids);
-    run(`UPDATE audit_logs SET user_id = NULL WHERE user_id IS NOT NULL AND user_id NOT IN (${ph})`, ids);
+    await run(`UPDATE library_visits SET user_id = NULL WHERE user_id IS NOT NULL AND user_id NOT IN (${ph})`, ids);
+    await run(`UPDATE audit_logs SET user_id = NULL WHERE user_id IS NOT NULL AND user_id NOT IN (${ph})`, ids);
 
     // References from rows that are staying, but pointed at removed staff.
-    run(`UPDATE book_requests SET reviewed_by = ? WHERE reviewed_by IS NOT NULL AND reviewed_by NOT IN (${ph})`, [librarian, ...ids]);
-    run(`UPDATE charges SET created_by = ? WHERE created_by IS NOT NULL AND created_by NOT IN (${ph})`, [librarian, ...ids]);
-    run(`UPDATE loans SET issued_by = ? WHERE issued_by IS NOT NULL AND issued_by NOT IN (${ph})`, [librarian, ...ids]);
-    run(`UPDATE loans SET returned_by = NULL WHERE returned_by IS NOT NULL AND returned_by NOT IN (${ph})`, ids);
-    run(`UPDATE library_visits SET signed_in_by = ? WHERE signed_in_by IS NOT NULL AND signed_in_by NOT IN (${ph})`, [librarian, ...ids]);
-    run(`UPDATE announcements SET created_by = ? WHERE created_by IS NOT NULL AND created_by NOT IN (${ph})`, [librarian, ...ids]);
-    run(`UPDATE resources SET submitted_by = ? WHERE submitted_by IS NOT NULL AND submitted_by NOT IN (${ph})`, [librarian, ...ids]);
-    run(`UPDATE resources SET approved_by = ? WHERE approved_by IS NOT NULL AND approved_by NOT IN (${ph})`, [librarian, ...ids]);
-    run(`UPDATE titles SET created_by = NULL WHERE created_by IS NOT NULL AND created_by NOT IN (${ph})`, ids);
-    run(`UPDATE acquisitions SET recorded_by = ? WHERE recorded_by IS NOT NULL AND recorded_by NOT IN (${ph})`, [librarian, ...ids]);
-    run(`UPDATE stocktakes SET started_by = ? WHERE started_by IS NOT NULL AND started_by NOT IN (${ph})`, [librarian, ...ids]);
+    await run(`UPDATE book_requests SET reviewed_by = ? WHERE reviewed_by IS NOT NULL AND reviewed_by NOT IN (${ph})`, [librarian, ...ids]);
+    await run(`UPDATE charges SET created_by = ? WHERE created_by IS NOT NULL AND created_by NOT IN (${ph})`, [librarian, ...ids]);
+    await run(`UPDATE loans SET issued_by = ? WHERE issued_by IS NOT NULL AND issued_by NOT IN (${ph})`, [librarian, ...ids]);
+    await run(`UPDATE loans SET returned_by = NULL WHERE returned_by IS NOT NULL AND returned_by NOT IN (${ph})`, ids);
+    await run(`UPDATE library_visits SET signed_in_by = ? WHERE signed_in_by IS NOT NULL AND signed_in_by NOT IN (${ph})`, [librarian, ...ids]);
+    await run(`UPDATE announcements SET created_by = ? WHERE created_by IS NOT NULL AND created_by NOT IN (${ph})`, [librarian, ...ids]);
+    await run(`UPDATE resources SET submitted_by = ? WHERE submitted_by IS NOT NULL AND submitted_by NOT IN (${ph})`, [librarian, ...ids]);
+    await run(`UPDATE resources SET approved_by = ? WHERE approved_by IS NOT NULL AND approved_by NOT IN (${ph})`, [librarian, ...ids]);
+    await run(`UPDATE titles SET created_by = NULL WHERE created_by IS NOT NULL AND created_by NOT IN (${ph})`, ids);
+    await run(`UPDATE acquisitions SET recorded_by = ? WHERE recorded_by IS NOT NULL AND recorded_by NOT IN (${ph})`, [librarian, ...ids]);
+    await run(`UPDATE stocktakes SET started_by = ? WHERE started_by IS NOT NULL AND started_by NOT IN (${ph})`, [librarian, ...ids]);
 
     // Reading lists belong to their owner; lists from removed users go with them.
-    run(`DELETE FROM reading_list_items WHERE list_id IN (SELECT id FROM reading_lists WHERE owner_id NOT IN (${ph}))`, ids);
-    run(`DELETE FROM reading_lists WHERE owner_id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM reading_list_items WHERE list_id IN (SELECT id FROM reading_lists WHERE owner_id NOT IN (${ph}))`, ids);
+    await run(`DELETE FROM reading_lists WHERE owner_id NOT IN (${ph})`, ids);
 
-    run(`DELETE FROM users WHERE id NOT IN (${ph})`, ids);
+    await run(`DELETE FROM users WHERE id NOT IN (${ph})`, ids);
 
     // Renumber the four demo accounts. Temp values first so the unique index on
     // library_id never collides while teacher/student shift down a number.
     for (const account of DEMO_LOGINS) {
       const row = keep.find((entry) => entry.email === account.email)!;
-      run('UPDATE users SET library_id = ? WHERE id = ?', [`TMP-${row.id}`, row.id]);
+      await run('UPDATE users SET library_id = ? WHERE id = ?', [`TMP-${row.id}`, row.id]);
     }
     for (const account of DEMO_LOGINS) {
       const row = keep.find((entry) => entry.email === account.email)!;
-      run('UPDATE users SET library_id = ? WHERE id = ?', [account.libraryId, row.id]);
+      await run('UPDATE users SET library_id = ? WHERE id = ?', [account.libraryId, row.id]);
     }
 
     // Copies follow the loans that survived the prune.
-    run(`UPDATE copies SET status = 'available'
+    await run(`UPDATE copies SET status = 'available'
          WHERE status = 'borrowed' AND id NOT IN (SELECT copy_id FROM loans WHERE status = 'active')`);
-    run(`UPDATE copies SET status = 'borrowed'
+    await run(`UPDATE copies SET status = 'borrowed'
          WHERE id IN (SELECT copy_id FROM loans WHERE status = 'active')`);
 
     const year = new Date().getFullYear();
-    const latest = get<{ value: number }>(
+    const latest = (await get<{ value: number }>(
       'SELECT MAX(CAST(substr(library_id, 10) AS INTEGER)) AS value FROM users WHERE library_id LIKE ?',
       [`LIB-${year}-%`]
-    )?.value ?? 0;
-    run(
+    ))?.value ?? 0;
+    await run(
       'INSERT INTO id_sequences (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value',
       [`library_id:${year}`, latest]
     );

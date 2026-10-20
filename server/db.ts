@@ -1,26 +1,42 @@
-import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createClient, type Client, type ResultSet } from '@libsql/client';
 
-export const DATA_DIR = path.resolve(process.env.DATA_DIR || './data');
+/**
+ * The library runs on libSQL: a plain SQLite file in development and a hosted
+ * database (Turso) in production. Both speak the same SQL, so the schema and
+ * every query below are unchanged — only the calls are asynchronous now,
+ * because the production database is reached over HTTPS.
+ */
+const onVercel = Boolean(process.env.VERCEL);
+export const DATA_DIR = path.resolve(process.env.DATA_DIR || (onVercel ? '/tmp/libra' : './data'));
 export const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 export const RESOURCE_DIR = path.join(UPLOAD_DIR, 'resources');
 export const COVER_DIR = path.join(UPLOAD_DIR, 'covers');
 export const BRAND_DIR = path.join(UPLOAD_DIR, 'branding');
 export const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 
-for (const dir of [DATA_DIR, UPLOAD_DIR, RESOURCE_DIR, COVER_DIR, BRAND_DIR, BACKUP_DIR]) {
-  fs.mkdirSync(dir, { recursive: true });
+// A serverless filesystem is read-only apart from /tmp, so this is best-effort.
+try {
+  for (const dir of [DATA_DIR, UPLOAD_DIR, RESOURCE_DIR, COVER_DIR, BRAND_DIR, BACKUP_DIR]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+} catch {
+  /* read-only filesystem — uploads live in blob storage there */
 }
 
 export const DB_PATH = path.join(DATA_DIR, 'libra.db');
-export const db = new DatabaseSync(DB_PATH);
+const remoteUrl = process.env.LIBSQL_URL || process.env.TURSO_DATABASE_URL;
+export const db: Client = createClient(
+  remoteUrl
+    ? { url: remoteUrl, authToken: process.env.LIBSQL_AUTH_TOKEN || process.env.TURSO_AUTH_TOKEN }
+    : { url: `file:${DB_PATH}` }
+);
 
-db.exec(`
-  PRAGMA journal_mode = WAL;
-  PRAGMA foreign_keys = ON;
-  PRAGMA busy_timeout = 5000;
-`);
+/** Statements inside a `tx()` body must run on the transaction, not the client. */
+type Runner = Pick<Client, 'execute'>;
+const txStorage = new AsyncLocalStorage<Runner>();
 
 const schema = `
 CREATE TABLE IF NOT EXISTS settings (
@@ -450,72 +466,68 @@ CREATE TABLE IF NOT EXISTS contact_messages (
 );
 `;
 
-db.exec(schema);
-
 /**
  * Small forward-compatible migrations. `CREATE TABLE IF NOT EXISTS` never adds
  * columns to a table that already exists, so new fields are ensured explicitly.
  */
-function ensureColumn(table: string, column: string, definition: string) {
-  const columns = all<{ name: string }>(`PRAGMA table_info(${table})`);
+async function ensureColumn(table: string, column: string, definition: string) {
+  const columns = await all<{ name: string }>(`PRAGMA table_info(${table})`);
   if (!columns.some((c) => c.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    await execRaw(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
 
-// School house (e.g. Aggrey, Guggisberg) — used on the front-desk register.
-ensureColumn('users', 'house', 'TEXT');
+/** Multi-statement SQL (schema, pragmas). Never used inside a transaction. */
+export async function execRaw(sql: string) {
+  await db.executeMultiple(sql);
+}
 
-// Library membership number. Readers are issued one when they register and use
-// it (instead of a school admission number) to sign in.
-ensureColumn('users', 'library_id', 'TEXT');
-
-// Online books reuse the digital-resources table.
-ensureColumn('resources', 'cover_url', 'TEXT');
-ensureColumn('resources', 'category', 'TEXT');
-
-db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_library_id ON users(library_id)');
-
-export type Params = ReadonlyArray<string | number | null | Uint8Array | bigint>;
+export type Params = ReadonlyArray<string | number | null | Uint8Array | bigint | boolean>;
 
 function normalise(params: Params) {
   return params.map((p) => (typeof p === 'boolean' ? (p ? 1 : 0) : p === undefined ? null : p));
 }
 
-export function all<T = Record<string, any>>(sql: string, params: Params = []): T[] {
-  return db.prepare(sql).all(...normalise(params)) as unknown as T[];
+async function execute(sql: string, params: Params): Promise<ResultSet> {
+  const runner = txStorage.getStore() ?? db;
+  return runner.execute({ sql, args: normalise(params) as never });
 }
 
-export function get<T = Record<string, any>>(sql: string, params: Params = []): T | undefined {
-  return db.prepare(sql).get(...normalise(params)) as unknown as T | undefined;
+export async function all<T = Record<string, any>>(sql: string, params: Params = []): Promise<T[]> {
+  return (await execute(sql, params)).rows as unknown as T[];
 }
 
-export function run(sql: string, params: Params = []): { changes: number; lastInsertRowid: number } {
-  const res = db.prepare(sql).run(...normalise(params));
-  return { changes: Number(res.changes), lastInsertRowid: Number(res.lastInsertRowid) };
+export async function get<T = Record<string, any>>(sql: string, params: Params = []): Promise<T | undefined> {
+  const rows = (await execute(sql, params)).rows as unknown as T[];
+  return rows[0];
 }
 
-export function scalar<T = number>(sql: string, params: Params = []): T {
-  const row = get<Record<string, any>>(sql, params);
+export async function run(sql: string, params: Params = []): Promise<{ changes: number; lastInsertRowid: number }> {
+  const res = await execute(sql, params);
+  return { changes: Number(res.rowsAffected), lastInsertRowid: Number(res.lastInsertRowid ?? 0) };
+}
+
+export async function scalar<T = number>(sql: string, params: Params = []): Promise<T> {
+  const row = await get<Record<string, any>>(sql, params);
   return (row ? Object.values(row)[0] : 0) as T;
 }
 
-let depth = 0;
-export function tx<T>(fn: () => T): T {
-  if (depth > 0) return fn();
-  db.exec('BEGIN IMMEDIATE');
-  depth++;
+/**
+ * Run a group of statements atomically. The callback receives the transaction
+ * through async context, so helpers called inside it use the same connection.
+ */
+export async function tx<T>(fn: () => Promise<T>): Promise<T> {
+  if (txStorage.getStore()) return fn();
+  const transaction = await db.transaction('write');
   try {
-    const result = fn();
-    depth--;
-    db.exec('COMMIT');
+    const result = await txStorage.run(transaction as unknown as Runner, fn);
+    await transaction.commit();
     return result;
   } catch (err) {
-    depth--;
     try {
-      db.exec('ROLLBACK');
+      await transaction.rollback();
     } catch {
-      /* ignore */
+      /* already rolled back */
     }
     throw err;
   }
@@ -530,18 +542,18 @@ export function formatLibraryId(year: number, sequence: number) {
   return `LIB-${year}-${String(sequence).padStart(4, '0')}`;
 }
 
-export function nextLibraryId(date = new Date()): string {
+export async function nextLibraryId(date = new Date()): Promise<string> {
   const year = date.getFullYear();
   const name = `library_id:${year}`;
   // Numbers are never reissued, even if an account is later deleted.
-  const counter = get<{ value: number }>('SELECT value FROM id_sequences WHERE name = ?', [name]);
-  const latest = get<{ value: number }>(
+  const counter = await get<{ value: number }>('SELECT value FROM id_sequences WHERE name = ?', [name]);
+  const latest = await get<{ value: number }>(
     'SELECT MAX(CAST(substr(library_id, 10) AS INTEGER)) AS value FROM users WHERE library_id LIKE ?',
     [`LIB-${year}-%`]
   );
   const last = Math.max(Number(counter?.value ?? 0), Number(latest?.value ?? 0));
   const next = (Number.isFinite(last) ? last : 0) + 1;
-  run('INSERT INTO id_sequences (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value', [name, next]);
+  await run('INSERT INTO id_sequences (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value', [name, next]);
   return formatLibraryId(year, next);
 }
 
@@ -549,20 +561,20 @@ export function nextLibraryId(date = new Date()): string {
  * Issue library IDs to accounts created before the library number existed
  * (legacy rows and freshly seeded demo users). Safe to call repeatedly.
  */
-export function ensureLibraryIds() {
-  const missing = all<{ id: number; created_at: string | null }>(
+export async function ensureLibraryIds(): Promise<number> {
+  const missing = await all<{ id: number; created_at: string | null }>(
     `SELECT id, created_at FROM users WHERE library_id IS NULL OR library_id = '' ORDER BY id`
   );
   if (!missing.length) return 0;
   for (const user of missing) {
     const year = Number(String(user.created_at ?? '').slice(0, 4)) || new Date().getFullYear();
-    const latest = get<{ library_id: string }>(
+    const latest = await get<{ library_id: string }>(
       'SELECT library_id FROM users WHERE library_id LIKE ? ORDER BY library_id DESC LIMIT 1',
       [`LIB-${year}-%`]
     );
     const last = latest?.library_id ? Number(latest.library_id.split('-')[2]) : 0;
     const value = formatLibraryId(year, (Number.isFinite(last) ? last : 0) + 1);
-    run('UPDATE users SET library_id = ? WHERE id = ?', [value, user.id]);
+    await run('UPDATE users SET library_id = ? WHERE id = ?', [value, user.id]);
   }
   return missing.length;
 }
@@ -571,8 +583,8 @@ export function ensureLibraryIds() {
  * Historical front-desk rows kept the old admission number. Rewrite them to the
  * member's library number so the register speaks one language.
  */
-export function refreshVisitLibraryIds() {
-  run(
+export async function refreshVisitLibraryIds(): Promise<void> {
+  await run(
     `UPDATE library_visits
         SET school_id = (SELECT u.library_id FROM users u WHERE u.id = library_visits.user_id)
       WHERE user_id IS NOT NULL
@@ -581,12 +593,35 @@ export function refreshVisitLibraryIds() {
   );
 }
 
-export function initDb() {
-  ensureLibraryIds();
-  const count = scalar<number>('SELECT COUNT(*) FROM users');
-  return { seeded: count > 0, users: count };
+let booted: Promise<{ seeded: boolean; users: number }> | null = null;
+
+/**
+ * Prepare the database once per process: create the schema on first boot, run
+ * the small migrations, then issue any missing library numbers.
+ */
+export function initDb(): Promise<{ seeded: boolean; users: number }> {
+  booted ??= initialise();
+  return booted;
 }
 
-// Accounts created before library numbers existed get one on first boot.
-ensureLibraryIds();
-refreshVisitLibraryIds();
+async function initialise() {
+  const exists = await all<{ name: string }>(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'users'"
+  );
+  if (!exists.length) await execRaw(schema);
+
+  // School house — used on the front-desk register.
+  await ensureColumn('users', 'house', 'TEXT');
+  // Library membership number, issued instead of a school admission number.
+  await ensureColumn('users', 'library_id', 'TEXT');
+  // Online books reuse the digital-resources table.
+  await ensureColumn('resources', 'cover_url', 'TEXT');
+  await ensureColumn('resources', 'category', 'TEXT');
+
+  await execRaw('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_library_id ON users(library_id)');
+
+  await ensureLibraryIds();
+  await refreshVisitLibraryIds();
+  const count = await scalar<number>('SELECT COUNT(*) FROM users');
+  return { seeded: count > 0, users: count };
+}
