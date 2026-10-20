@@ -26,7 +26,17 @@ export default function smokeRoutes(key: string) {
       'teacher@tema.edu.gh': 'Teacher@123',
       'student@tema.edu.gh': 'Student@123',
     };
+    let blobCheck: unknown = 'skipped';
+    if (req.query.blob === '1' && blobMode()) {
+      const { put, del } = await import('@vercel/blob');
+      const created = await put(`smoke/${Date.now()}.txt`, 'libra blob check', { access: 'public', addRandomSuffix: true });
+      const fetched = await fetch(created.url);
+      const text = await fetched.text();
+      await del(created.url);
+      blobCheck = { status: fetched.status, body: text, host: new URL(created.url).hostname };
+    }
     res.json({
+      blobCheck,
       users: users.length,
       accounts: users.map((u) => ({
         email: u.email,
