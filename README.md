@@ -149,7 +149,7 @@ session.
 signed in without one. Members show their library ID, role and status; walk-ins show the name, class and
 house they gave at the desk, and are labelled **walk-in**. The list merges two sources — `users` and
 `library_visits WHERE user_id IS NULL` (deduplicated by lowercased name) — so a guest never has to be
-typed in twice. Search by name, email, library ID, class or house, switch between everyone/members/walk-ins,
+typed in twice. Search by name, username, email, library ID, class or house, switch between everyone/members/walk-ins,
 and export exactly what is on screen as CSV.
 
 Opening a person shows their profile and recent visits. For a real account an admin can:
