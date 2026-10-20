@@ -9,6 +9,7 @@ import { all, db, initDb, scalar, BRAND_DIR } from './db.js';
 import { authenticate, pruneRevokedSessions } from './auth.js';
 import { HttpError } from './http.js';
 import { seed } from './seed/index.js';
+import { ensureHostedSeed } from './seed/hosted.js';
 import { getSettings, loadSettings } from './settings.js';
 
 import authRoutes from './routes/auth.js';
@@ -175,38 +176,6 @@ app.use((err: any, req: express.Request, res: express.Response, _next: express.N
   });
 });
 
-// The schema and the settings cache must exist before the first query.
-await initDb();
-await loadSettings();
-
-const userCount = await scalar<number>('SELECT COUNT(*) FROM users');
-const autoSeed = process.env.AUTO_SEED !== 'false';
-if (userCount === 0 && !autoSeed) {
-  console.warn('[seed] The database is empty and AUTO_SEED=false — no accounts exist yet.');
-}
-if (userCount === 0 && autoSeed) {
-  console.log('[seed] Empty database detected — creating the demo library…');
-  const result = await seed();
-  if (result.seeded) {
-    await loadSettings();
-    console.log(`[seed] ${result.titles} titles, ${result.copies} copies, ${result.users} members, ${result.loans} loans, ${result.resources} books online.`);
-    if (isProd) {
-      console.warn('[seed] Demo accounts were created in production. Sign in and change their passwords.');
-      console.warn('[seed] Set AUTO_SEED=false to skip this on future empty databases.');
-    }
-    if (!isProd) {
-      console.log('[seed] Demo sign-ins: admin@tema.edu.gh / Admin@123 · librarian@tema.edu.gh / Library@123');
-      console.log('[seed]               teacher@tema.edu.gh / Teacher@123 · student@tema.edu.gh / Student@123');
-      if (!isProd) {
-        const demo = await all<{ email: string; library_id: string }>(
-          `SELECT email, library_id FROM users WHERE email IN ('admin@tema.edu.gh','librarian@tema.edu.gh','teacher@tema.edu.gh','student@tema.edu.gh') ORDER BY id`
-        );
-        for (const row of demo) console.log(`[seed]               library ID ${row.library_id} → ${row.email}`);
-      }
-    }
-  }
-}
-
 // Housekeeping: expiries and reminders. Runs at start and every 30 minutes.
 async function housekeeping() {
   try {
@@ -215,25 +184,74 @@ async function housekeeping() {
     console.error('[housekeeping]', err);
   }
 }
-housekeeping();
-setInterval(housekeeping, 30 * 60 * 1000).unref?.();
+
+/**
+ * Everything that must exist before the first query. A serverless host imports
+ * this module per request, so the work is done behind a single shared promise
+ * instead of top-level await (which some bundlers cannot emit).
+ */
+async function boot() {
+  await initDb();
+  await loadSettings();
+
+  if (await ensureHostedSeed()) {
+    await loadSettings();
+    console.log('[seed] Hosted database prepared: school accounts and reference lists restored.');
+  }
+
+  const userCount = await scalar<number>('SELECT COUNT(*) FROM users');
+  const autoSeed = process.env.AUTO_SEED !== 'false';
+  if (userCount === 0 && !autoSeed) {
+    console.warn('[seed] The database is empty and AUTO_SEED=false — no accounts exist yet.');
+  }
+  if (userCount === 0 && autoSeed) {
+    console.log('[seed] Empty database detected — creating the demo library…');
+    const result = await seed();
+    if (result.seeded) {
+      await loadSettings();
+      console.log(`[seed] ${result.titles} titles, ${result.copies} copies, ${result.users} members, ${result.loans} loans, ${result.resources} books online.`);
+      if (isProd) {
+        console.warn('[seed] Demo accounts were created in production. Sign in and change their passwords.');
+        console.warn('[seed] Set AUTO_SEED=false to skip this on future empty databases.');
+      }
+      if (!isProd) {
+        console.log('[seed] Demo sign-ins: admin@tema.edu.gh / Admin@123 · librarian@tema.edu.gh / Library@123');
+        console.log('[seed]               teacher@tema.edu.gh / Teacher@123 · student@tema.edu.gh / Student@123');
+        if (!isProd) {
+          const demo = await all<{ email: string; library_id: string }>(
+            `SELECT email, library_id FROM users WHERE email IN ('admin@tema.edu.gh','librarian@tema.edu.gh','teacher@tema.edu.gh','student@tema.edu.gh') ORDER BY id`
+          );
+          for (const row of demo) console.log(`[seed]               library ID ${row.library_id} → ${row.email}`);
+        }
+      }
+    }
+  }
+
+  housekeeping();
+  setInterval(housekeeping, 30 * 60 * 1000).unref?.();
+}
+
+/** Resolves once the schema, settings and accounts are ready. */
+export const ready: Promise<void> = boot();
 
 // Vercel imports this module as a serverless function: it must not listen.
 if (!process.env.VERCEL) {
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Libra API listening on http://0.0.0.0:${PORT}${isProd ? ' (production)' : ''}`);
-  });
-
-  const shutdown = (signal: string) => {
-    console.log(`[shutdown] ${signal} received — closing the library server…`);
-    server.close(() => {
-      try { void db.close(); } catch { /* already closed */ }
-      process.exit(0);
+  void ready.then(() => {
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Libra API listening on http://0.0.0.0:${PORT}${isProd ? ' (production)' : ''}`);
     });
-    setTimeout(() => process.exit(0), 8000).unref();
-  };
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+
+    const shutdown = (signal: string) => {
+      console.log(`[shutdown] ${signal} received — closing the library server…`);
+      server.close(() => {
+        try { void db.close(); } catch { /* already closed */ }
+        process.exit(0);
+      });
+      setTimeout(() => process.exit(0), 8000).unref();
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+  });
 }
 
 // Exported for tests / tooling
